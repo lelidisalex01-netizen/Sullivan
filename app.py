@@ -11,7 +11,7 @@ import stripe
 import requests
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V19.2", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V19.2.1", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -3638,7 +3638,7 @@ def logout_v17():
         "auth_user","auth_company","auth_role","show_join_company","show_create_company",
         "v1722_workspace_select","v19_workspace_pending_label",
         "v19_workspace_pending_company_id","v19_workspace_pending_role",
-        "v19_workspace_switched_to"
+        "v19_workspace_select_reset","v19_workspace_switched_to"
     ]:
         st.session_state.pop(k,None)
 
@@ -3649,7 +3649,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.2</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.2.1</span></div>",unsafe_allow_html=True)
 
 
 
@@ -3674,6 +3674,8 @@ if "v19_workspace_pending_company_id" not in st.session_state:
     st.session_state["v19_workspace_pending_company_id"] = None
 if "v19_workspace_pending_role" not in st.session_state:
     st.session_state["v19_workspace_pending_role"] = None
+if "v19_workspace_select_reset" not in st.session_state:
+    st.session_state["v19_workspace_select_reset"] = None
 
 
 # V18.3: if Streamlit has a valid Google OIDC identity, turn it into a
@@ -3858,7 +3860,7 @@ if st.session_state.get("v171_auth_open"):
                 if not match.empty:
                     r=match.iloc[0]
                     activate_workspace(u, r, persist=True)
-                    st.session_state["v1722_workspace_select"] = f'{r.company_name} · {r.role}'
+                    st.session_state["v19_workspace_select_reset"] = f'{r.company_name} · {r.role}'
                 v171_close_auth()
                 st.success(f"Connected to {joined['company_name']}.")
                 st.rerun()
@@ -3918,7 +3920,15 @@ with st.sidebar:
 
             # The selector chooses a DESTINATION only. It does not switch workspaces
             # until the user explicitly confirms below.
-            if "v1722_workspace_select" not in st.session_state:
+            #
+            # Streamlit does not allow changing a widget's session-state key after
+            # that widget has already been instantiated in the same run. Therefore,
+            # confirmation buttons only stage a reset target; it is applied HERE,
+            # before the selectbox is created on the next rerun.
+            reset_target = st.session_state.pop("v19_workspace_select_reset", None)
+            if reset_target in options:
+                st.session_state["v1722_workspace_select"] = reset_target
+            elif "v1722_workspace_select" not in st.session_state:
                 st.session_state["v1722_workspace_select"] = current_label
             elif st.session_state["v1722_workspace_select"] not in options:
                 st.session_state["v1722_workspace_select"] = current_label
@@ -3964,7 +3974,7 @@ with st.sidebar:
                     st.session_state["v19_workspace_pending_label"] = None
                     st.session_state["v19_workspace_pending_company_id"] = None
                     st.session_state["v19_workspace_pending_role"] = None
-                    st.session_state["v1722_workspace_select"] = current_label
+                    st.session_state["v19_workspace_select_reset"] = current_label
                     st.rerun()
 
                 if switch_col.button(
@@ -3980,7 +3990,7 @@ with st.sidebar:
                         target_match = memberships[memberships.company_id == target_id]
                         if target_match.empty:
                             st.session_state["v19_workspace_pending_label"] = None
-                            st.session_state["v1722_workspace_select"] = current_label
+                            st.session_state["v19_workspace_select_reset"] = current_label
                             st.error("That company workspace is no longer available to this account.")
                             st.rerun()
                         activate_workspace(auth_u, target_match.iloc[0], persist=True)
@@ -3988,7 +3998,7 @@ with st.sidebar:
                     st.session_state["v19_workspace_pending_label"] = None
                     st.session_state["v19_workspace_pending_company_id"] = None
                     st.session_state["v19_workspace_pending_role"] = None
-                    st.session_state["v1722_workspace_select"] = destination_name
+                    st.session_state["v19_workspace_select_reset"] = destination_name
                     st.session_state["v19_workspace_switched_to"] = destination_name
                     st.rerun()
 
@@ -4010,7 +4020,7 @@ with st.sidebar:
                         if not match.empty:
                             mr = match.iloc[0]
                             activate_workspace(auth_u, mr, persist=True)
-                            st.session_state["v1722_workspace_select"] = f'{mr.company_name} · {mr.role}'
+                            st.session_state["v19_workspace_select_reset"] = f'{mr.company_name} · {mr.role}'
                         st.success(f"Joined {joined['company_name']}.")
                         st.rerun()
                     except Exception as e:
@@ -4029,7 +4039,7 @@ with st.sidebar:
                         if not match.empty:
                             mr = match.iloc[0]
                             activate_workspace(auth_u, mr, persist=True)
-                            st.session_state["v1722_workspace_select"] = f'{mr.company_name} · {mr.role}'
+                            st.session_state["v19_workspace_select_reset"] = f'{mr.company_name} · {mr.role}'
                         st.success(f"Company created. Company ID: {code}")
                         st.rerun()
                     except Exception as e:
