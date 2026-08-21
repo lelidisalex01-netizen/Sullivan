@@ -13,7 +13,7 @@ import stripe
 import requests
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V20.4.1", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V20.4.2", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -538,6 +538,10 @@ def init_db():
         frequency TEXT NOT NULL DEFAULT 'Monthly',
         tax_withheld REAL NOT NULL DEFAULT 0,
         other_deductions REAL NOT NULL DEFAULT 0,
+        filing_status TEXT NOT NULL DEFAULT 'Single',
+        include_in_budget INTEGER DEFAULT 1,
+        region_label TEXT,
+        estimated_net_per_period REAL DEFAULT 0,
         active INTEGER DEFAULT 1,
         notes TEXT,
         created_at TEXT NOT NULL
@@ -570,6 +574,18 @@ def init_db():
         region_label TEXT,
         created_at TEXT NOT NULL
         )""")
+
+        # V20.4.2 migration: income records now feed future Personal/Business Budgeting.
+        income_cols = [r[1] for r in c.execute("PRAGMA table_info(income_sources)").fetchall()]
+        income_wanted = {
+            "filing_status":"TEXT NOT NULL DEFAULT 'Single'",
+            "include_in_budget":"INTEGER DEFAULT 1",
+            "region_label":"TEXT",
+            "estimated_net_per_period":"REAL DEFAULT 0"
+        }
+        for col,ctype in income_wanted.items():
+            if col not in income_cols:
+                c.execute(f"ALTER TABLE income_sources ADD COLUMN {col} {ctype}")
 
         # V10.7 migration for databases created by earlier versions.
         transaction_cols = [r[1] for r in c.execute("PRAGMA table_info(transactions)").fetchall()]
@@ -4230,7 +4246,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V20.4.1</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V20.4.2</span></div>",unsafe_allow_html=True)
 
 
 
@@ -7309,10 +7325,18 @@ def v204_us_federal_income_tax_2026(gross, filing_status="Single"):
     taxable=max(0.0,gross-deduction)
     return v204_progressive_tax(taxable,brackets)
 
-def v204_virginia_income_tax(gross):
-    # Planning estimate using Virginia's published individual rate schedule.
-    taxable=max(0.0,float(gross or 0)-3000.0)
-    return v204_progressive_tax(taxable,[(3000,.02),(5000,.03),(17000,.05),(10**12,.0575)])
+def v204_virginia_income_tax(gross, filing_status="Single"):
+    # 2026 Virginia planning estimate.
+    # Virginia's 2026 standard deduction is $8,750 for single/separate filers
+    # and $17,500 for married filing jointly. Federal Head of Household maps
+    # to Virginia single filing treatment for this planning estimate.
+    status=str(filing_status or "Single")
+    deduction=17500.0 if status=="Married filing jointly" else 8750.0
+    taxable=max(0.0,float(gross or 0)-deduction)
+    return v204_progressive_tax(
+        taxable,
+        [(3000,.02),(5000,.03),(17000,.05),(10**12,.0575)]
+    )
 
 def v204_tax_estimate(annual_gross, country, region, filing_status="Single"):
     gross=max(0.0,float(annual_gross or 0))
@@ -7324,7 +7348,7 @@ def v204_tax_estimate(annual_gross, country, region, filing_status="Single"):
         result["medicare"]=gross*.0145 + max(0.0,gross-200000.0)*.009
         result["employer_payroll"]=min(gross,184500.0)*.062 + gross*.0145
         if region=="Virginia":
-            result["regional"]=v204_virginia_income_tax(gross)
+            result["regional"]=v204_virginia_income_tax(gross,filing_status)
             result["supported"]=True
             result["note"]="2026 U.S. federal + Virginia planning estimate."
         else:
@@ -7334,6 +7358,70 @@ def v204_tax_estimate(annual_gross, country, region, filing_status="Single"):
     result["total_employee_tax"]=result["federal"]+result["regional"]+result["social"]+result["medicare"]
     result["estimated_net"]=max(0.0,gross-result["total_employee_tax"])
     return result
+
+
+def v204_periods_per_year(frequency):
+    return {"Weekly":52,"Biweekly":26,"Semimonthly":24,"Monthly":12,"Annual":1}.get(str(frequency),12)
+
+def v204_estimate_income_source(gross_per_period, frequency, country, region,
+                                filing_status="Single", other_deductions_per_period=0.0):
+    """
+    Convert a gross pay/income amount into an estimated net amount using the
+    workspace tax region. This is a budgeting/planning estimate, not a tax return.
+    """
+    gross=float(gross_per_period or 0)
+    other=float(other_deductions_per_period or 0)
+    periods=v204_periods_per_year(frequency)
+    annual_gross=gross*periods
+    annual_other=other*periods
+    tax=v204_tax_estimate(annual_gross,country,region,filing_status)
+    annual_net=max(0.0,annual_gross-float(tax["total_employee_tax"])-annual_other)
+    per_net=annual_net/periods if periods else 0.0
+    per_tax=float(tax["total_employee_tax"])/periods if periods else 0.0
+    return {
+        "annual_gross":annual_gross,
+        "annual_net":annual_net,
+        "net_per_period":per_net,
+        "tax_per_period":per_tax,
+        "other_per_period":other,
+        "tax":tax,
+    }
+
+def v204_budget_income_baseline(country=None, region=None, filing_status="Single"):
+    """
+    Single source of truth for the future Budgeting module.
+    Any active income source marked 'include_in_budget' automatically rolls into
+    a monthly estimated-net-income baseline.
+    """
+    country=country or v204_region()[0]
+    region=region or v204_region()[1]
+    df=read("""SELECT * FROM income_sources
+               WHERE active=1 AND COALESCE(include_in_budget,1)=1
+               ORDER BY id""")
+    if df.empty:
+        return {"annual_gross":0.0,"annual_net":0.0,"monthly_net":0.0,"sources":0}
+
+    annual_gross=0.0
+    annual_other=0.0
+    # Use the most recently stored filing status if available.
+    statuses=[str(v) for v in df.get("filing_status",pd.Series(dtype=str)).dropna().tolist() if str(v)]
+    if statuses:
+        filing_status=statuses[-1]
+
+    for _,r in df.iterrows():
+        annual_gross += v204_annualize(r.get("gross_amount",0),r.get("frequency","Monthly"))
+        annual_other += v204_annualize(r.get("other_deductions",0),r.get("frequency","Monthly"))
+
+    tax=v204_tax_estimate(annual_gross,country,region,filing_status)
+    annual_net=max(0.0,annual_gross-float(tax["total_employee_tax"])-annual_other)
+    return {
+        "annual_gross":annual_gross,
+        "annual_net":annual_net,
+        "monthly_net":annual_net/12.0,
+        "sources":len(df),
+        "filing_status":filing_status,
+        "tax_note":tax["note"],
+    }
 
 def v204_income_summary():
     df=read("SELECT * FROM income_sources WHERE active=1 ORDER BY id DESC")
@@ -7359,15 +7447,21 @@ def v204_render_income_payroll():
         return
 
     sources,annual_gross,annual_withheld,annual_other=v204_income_summary()
-    personal_tax=v204_tax_estimate(annual_gross,country,region,"Single")
+    default_filing = "Single"
+    if not sources.empty and "filing_status" in sources.columns:
+        saved_statuses=[str(v) for v in sources["filing_status"].dropna().tolist() if str(v)]
+        if saved_statuses:
+            default_filing=saved_statuses[0]
+    personal_tax=v204_tax_estimate(annual_gross,country,region,default_filing)
     estimated_net=max(0.0,annual_gross-personal_tax["total_employee_tax"]-annual_other)
+    budget_base=v204_budget_income_baseline(country,region,default_filing)
 
-    # Gross vs net explainer
+    # Gross -> tax/deductions -> net -> budgeting baseline
     a,b,c,d=st.columns(4)
     a.metric("Annual gross income",f"${annual_gross:,.2f}")
-    b.metric("Estimated net income",f"${estimated_net:,.2f}")
-    c.metric("Taxes / payroll taxes",f"${personal_tax['total_employee_tax']:,.2f}")
-    d.metric("Other deductions",f"${annual_other:,.2f}")
+    b.metric("Estimated annual net",f"${estimated_net:,.2f}")
+    c.metric("Estimated monthly net",f"${estimated_net/12:,.2f}")
+    d.metric("Monthly income for Budgeting",f"${budget_base['monthly_net']:,.2f}")
 
     st.info(
         "**Gross vs. net:** Gross income is what is earned before taxes and deductions. "
@@ -7385,31 +7479,126 @@ def v204_render_income_payroll():
                 st.info("No income sources recorded yet.")
             else:
                 show=sources.copy()
-                show["Annual gross"]=show.apply(lambda r:v204_annualize(r["gross_amount"],r["frequency"]),axis=1)
-                show["Annual deductions"]=show.apply(
-                    lambda r:v204_annualize(float(r["tax_withheld"] or 0)+float(r["other_deductions"] or 0),r["frequency"]),axis=1)
-                st.dataframe(show[["source_name","income_type","frequency","gross_amount","Annual gross","Annual deductions"]],
-                             width="stretch",hide_index=True)
+                show["Annual gross"]=show.apply(
+                    lambda r:v204_annualize(r["gross_amount"],r["frequency"]),axis=1
+                )
+                if "estimated_net_per_period" not in show.columns:
+                    show["estimated_net_per_period"]=0.0
+                show["Estimated net / period"]=pd.to_numeric(
+                    show["estimated_net_per_period"],errors="coerce"
+                ).fillna(0.0)
+                show["Budget"]=show.get("include_in_budget",1).apply(
+                    lambda v:"Included" if int(v or 0)==1 else "Excluded"
+                ) if hasattr(show.get("include_in_budget",1),"apply") else "Included"
+                st.dataframe(
+                    show[[
+                        "source_name","income_type","frequency","gross_amount",
+                        "Estimated net / period","Annual gross","Budget"
+                    ]],
+                    width="stretch",hide_index=True
+                )
+
+                st.success(
+                    f"**Budgeting connection ready:** Sullivan currently has approximately "
+                    f"**${budget_base['monthly_net']:,.2f}/month of estimated net income** "
+                    "available as the starting income for the upcoming Budgeting module."
+                )
         with right:
-            st.markdown("### Add income")
-            with st.form("v204_add_income"):
-                nm=st.text_input("Income source",placeholder="Employer, salary, side business, pension…")
-                it=st.selectbox("Income type",["Employment","Self-employment","Business distribution","Pension","Investment income","Rental income","Other"])
-                fr=st.selectbox("Frequency",["Weekly","Biweekly","Semimonthly","Monthly","Annual"])
-                ga=st.number_input("Gross amount per period",min_value=0.0,step=100.0,format="%.2f")
-                tw=st.number_input("Tax already withheld per period",min_value=0.0,step=10.0,format="%.2f")
-                od=st.number_input("Other deductions per period",min_value=0.0,step=10.0,format="%.2f")
-                notes=st.text_input("Notes",placeholder="Optional")
-                if st.form_submit_button("Add income source",type="primary"):
-                    if not nm.strip() or ga<=0:
-                        st.error("Enter an income source and gross amount.")
-                    else:
-                        now=datetime.now().isoformat(timespec="seconds")
-                        write(lambda c:c.execute("""INSERT INTO income_sources(
-                            source_name,income_type,gross_amount,frequency,tax_withheld,other_deductions,active,notes,created_at)
-                            VALUES(?,?,?,?,?,?,?,?,?)""",(nm.strip(),it,ga,fr,tw,od,1,notes.strip(),now)))
-                        st.success("Income source added.")
-                        st.rerun()
+            st.markdown("### Gross → estimated net")
+            st.caption(
+                f"Enter gross income and Sullivan estimates take-home using **{region}, {country}**."
+            )
+
+            nm=st.text_input(
+                "Income source",
+                placeholder="Employer, salary, pension, side income…",
+                key="v2042_income_name"
+            )
+            it=st.selectbox(
+                "Income type",
+                ["Employment","Self-employment","Business distribution","Pension",
+                 "Investment income","Rental income","Other"],
+                key="v2042_income_type"
+            )
+            fr=st.selectbox(
+                "How often are you paid?",
+                ["Weekly","Biweekly","Semimonthly","Monthly","Annual"],
+                key="v2042_income_freq"
+            )
+            ga=st.number_input(
+                "Gross income per pay period",
+                min_value=0.0,
+                step=100.0,
+                format="%.2f",
+                key="v2042_income_gross"
+            )
+            filing=st.selectbox(
+                "Filing status",
+                ["Single","Married filing jointly","Head of household"],
+                key="v2042_income_filing"
+            )
+            od=st.number_input(
+                "Other deductions per pay period",
+                min_value=0.0,
+                step=10.0,
+                format="%.2f",
+                help="Examples: benefits, insurance, retirement contributions, or other payroll deductions.",
+                key="v2042_income_other"
+            )
+
+            preview=v204_estimate_income_source(
+                ga,fr,country,region,filing,od
+            )
+
+            p1,p2=st.columns(2)
+            p1.metric("Gross",f"${ga:,.2f}")
+            p2.metric("Estimated net",f"${preview['net_per_period']:,.2f}")
+
+            if ga>0:
+                difference=max(0.0,ga-preview["net_per_period"])
+                st.write(
+                    f"About **${difference:,.2f}** per period is estimated to go to "
+                    "income/payroll taxes and other entered deductions."
+                )
+                st.caption(preview["tax"]["note"])
+
+            include_budget=st.checkbox(
+                "Use this income in my future Sullivan Budget",
+                value=True,
+                key="v2042_income_budget"
+            )
+            notes=st.text_input(
+                "Notes",
+                placeholder="Optional",
+                key="v2042_income_notes"
+            )
+
+            if st.button(
+                "Save income & net estimate",
+                type="primary",
+                width="stretch",
+                key="v2042_save_income"
+            ):
+                if not nm.strip() or ga<=0:
+                    st.error("Enter an income source and gross amount.")
+                else:
+                    now=datetime.now().isoformat(timespec="seconds")
+                    region_label=f"{region}, {country}"
+                    write(lambda c:c.execute("""INSERT INTO income_sources(
+                        source_name,income_type,gross_amount,frequency,tax_withheld,
+                        other_deductions,filing_status,include_in_budget,region_label,
+                        estimated_net_per_period,active,notes,created_at)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            nm.strip(),it,ga,fr,0.0,od,filing,
+                            1 if include_budget else 0,region_label,
+                            preview["net_per_period"],1,notes.strip(),now
+                        )))
+                    st.success(
+                        f"Saved. Sullivan estimates **${preview['net_per_period']:,.2f} net per {fr.lower()} period** "
+                        + ("and included it in your Budgeting income baseline." if include_budget else "")
+                    )
+                    st.rerun()
 
     with tabs[1]:
         st.markdown("### Where gross income goes")
@@ -7425,6 +7614,11 @@ def v204_render_income_payroll():
             st.write(f"**Estimated tax/payroll-tax share:** {effective:.1f}% of gross income.")
             st.write(f"**Estimated take-home share:** {(net/annual_gross)*100:.1f}% of gross income.")
         st.caption(tax["note"])
+        st.info(
+            f"**Connected to Budgeting:** active income sources marked for budgeting currently provide "
+            f"an estimated **${budget_base['monthly_net']:,.2f} per month net-income baseline**. "
+            "When Sullivan Budget is added, this will flow in automatically instead of making you enter income twice."
+        )
         if country=="United States" and region=="Virginia":
             st.success("Virginia tax profile is active. Sullivan is using the 2026 U.S. federal rules and Virginia individual rate schedule for planning estimates.")
         elif not tax["supported"]:
