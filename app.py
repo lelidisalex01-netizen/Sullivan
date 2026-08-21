@@ -9,10 +9,10 @@ from dotenv import load_dotenv, set_key
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V17.2.2", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V18.0", page_icon="S", layout="wide")
 
 
-# Sullivan V17.2.2 visual system: calm navy + blue + mint + warm amber.
+# Sullivan V18.0 visual system: calm navy + blue + mint + warm amber.
 APP_DIR = Path(__file__).resolve().parent
 ENV_PATH = APP_DIR / ".env"
 DB_PATH = APP_DIR / "sullivan.db"
@@ -92,7 +92,48 @@ CATEGORY_TO_ACCOUNT = {
     "Owner Contribution / Draw":"3000 Owner Equity","Uncategorized":"6999 Uncategorized Expense",
     "Needs Review":"6999 Uncategorized Expense",
 }
+
 CATEGORIES = list(CATEGORY_TO_ACCOUNT)
+
+# Sullivan V18 membership foundation.
+# Stripe is intentionally NOT connected yet. These definitions control the
+# internal subscription/credit model that Stripe will activate later.
+SULLIVAN_PLANS = {
+    "Trial": {
+        "price": 0,
+        "ai_credits": 0,
+        "seat_limit": 1,
+        "label": "Free preview",
+    },
+    "Starter": {
+        "price": 19,
+        "ai_credits": 500,
+        "seat_limit": 1,
+        "label": "Solo business",
+    },
+    "Business": {
+        "price": 49,
+        "ai_credits": 2500,
+        "seat_limit": 5,
+        "label": "Small business team",
+    },
+    "Pro": {
+        "price": 99,
+        "ai_credits": 10000,
+        "seat_limit": 15,
+        "label": "Growing business",
+    },
+}
+
+AI_CREDIT_COSTS = {
+    "transaction_categorization": 1,
+    "transaction_resolution": 1,
+    "receipt_analysis": 2,
+    "invoice_analysis": 2,
+    "accounting_question": 2,
+    "reconciliation_assist": 5,
+    "month_end_review": 15,
+}
 
 RULES = [
     (r"\b(shell|esso|petro[- ]?canada|ultramar|chevron|exxon|mobil)\b","Vehicle / Fuel",.97),
@@ -454,14 +495,18 @@ def classify_rule(desc,amt):
     return None
 
 def ai_classify(client,p,desc,amt):
+    credit_cost=AI_CREDIT_COSTS["transaction_categorization"]
+    company_id=v18_require_ai_credits("transaction_categorization",credit_cost)
     r=client.responses.parse(model=MODEL,input=[{"role":"system","content":"You are a conservative bookkeeping preparation assistant."},
     {"role":"user","content":f"Business {p['entity_type']} in {p['region']}, {p['country']}; industry {p['industry']}. Transaction {desc}; amount {amt}. Allowed categories: {', '.join(CATEGORIES)}."}],
     text_format=Classification).output_parsed
     cat=r.category if r.category in CATEGORIES else "Needs Review"
     rev=r.review_required or r.confidence<.85 or any(x in str(desc).lower() for x in ALWAYS_REVIEW)
-    return dict(category=cat,confidence=float(r.confidence),review=rev,explanation=r.explanation,
+    result=dict(category=cat,confidence=float(r.confidence),review=rev,explanation=r.explanation,
         question=r.question_for_owner or "",source="ai",counterparty_name=r.counterparty_name or "",
         counterparty_type=r.counterparty_type or "Unknown")
+    v18_consume_ai_credits(company_id,"transaction_categorization",credit_cost,f"{desc} | {amt}")
+    return result
 
 def analyze(df,p):
     client=OpenAI(api_key=key()) if key() else None;rows=[];bar=st.progress(0)
@@ -481,13 +526,17 @@ def analyze(df,p):
     bar.empty();return pd.DataFrame(rows)
 
 def resolve_ai(client,p,row,answer):
+    credit_cost=AI_CREDIT_COSTS["transaction_resolution"]
+    company_id=v18_require_ai_credits("transaction_resolution",credit_cost)
     r=client.responses.parse(model=MODEL,input=[{"role":"system","content":"Resolve ambiguous bookkeeping conservatively."},
     {"role":"user","content":f"Business {p['entity_type']} in {p['region']}, {p['country']}; industry {p['industry']}. Transaction {row['description']}; amount {row['amount']}; current {row['category']}; owner answer: {answer}. Allowed categories: {', '.join(CATEGORIES)}."}],
     text_format=Resolution).output_parsed
     cat=r.category if r.category in CATEGORIES else "Needs Review";ok=bool(r.resolved) and r.confidence>=.85
-    return dict(category=cat,confidence=float(r.confidence),review=not ok,explanation=r.explanation,
+    result=dict(category=cat,confidence=float(r.confidence),review=not ok,explanation=r.explanation,
         question=r.follow_up_question or "",source="ai+owner",owner_answer=answer,status="Ready for books" if ok else "Needs your answer",
         counterparty_name=r.counterparty_name or "",counterparty_type=r.counterparty_type or "Unknown")
+    v18_consume_ai_credits(company_id,"transaction_resolution",credit_cost,f"{row['description']} | owner answer")
+    return result
 
 def split_quebec_tax_from_gross(gross_amount):
     """
@@ -2520,12 +2569,47 @@ def v17_init_auth_tables():
             used_by_user_id INTEGER,
             used_at TEXT
         )""")
-        # V17.2.2 migrations for Google/OIDC identities.
+        # V18.0 migrations for Google/OIDC identities.
         user_cols = [r[1] for r in c.execute("PRAGMA table_info(app_users)").fetchall()]
         if "auth_provider" not in user_cols:
             c.execute("ALTER TABLE app_users ADD COLUMN auth_provider TEXT DEFAULT 'email'")
         if "provider_subject" not in user_cols:
             c.execute("ALTER TABLE app_users ADD COLUMN provider_subject TEXT")
+
+        # V18 membership / AI-credit migrations.
+        company_cols = [r[1] for r in c.execute("PRAGMA table_info(companies)").fetchall()]
+        company_wanted = {
+            "subscription_status": "TEXT DEFAULT 'Trial'",
+            "ai_credit_limit": "INTEGER DEFAULT 0",
+            "ai_credits_used": "INTEGER DEFAULT 0",
+            "ai_period_start": "TEXT",
+            "seat_limit": "INTEGER DEFAULT 1",
+            "demo_used": "INTEGER DEFAULT 0",
+            "stripe_customer_id": "TEXT",
+            "stripe_subscription_id": "TEXT",
+        }
+        for col, ctype in company_wanted.items():
+            if col not in company_cols:
+                c.execute(f"ALTER TABLE companies ADD COLUMN {col} {ctype}")
+
+        # Backfill sensible values for companies created before V18.
+        c.execute("""UPDATE companies
+                     SET subscription_status=COALESCE(subscription_status,'Trial'),
+                         ai_credit_limit=COALESCE(ai_credit_limit,0),
+                         ai_credits_used=COALESCE(ai_credits_used,0),
+                         seat_limit=CASE WHEN seat_limit IS NULL OR seat_limit<1 THEN 1 ELSE seat_limit END,
+                         demo_used=COALESCE(demo_used,0)""")
+
+        c.execute("""CREATE TABLE IF NOT EXISTS ai_usage(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL,
+            user_id INTEGER,
+            action TEXT NOT NULL,
+            credits INTEGER NOT NULL DEFAULT 0,
+            source TEXT DEFAULT 'subscription',
+            detail TEXT,
+            created_at TEXT NOT NULL
+        )""")
     write(f)
 
 def create_app_user(full_name,email,password,personal_account=True):
@@ -2687,8 +2771,11 @@ def create_company_for_user(user_id,company_name):
     company_code=_new_company_id()
     stamp=datetime.now().isoformat(timespec="seconds")
     def f(c):
-        c.execute("""INSERT INTO companies(company_code,company_name,owner_user_id,subscription_plan,status,created_at)
-                     VALUES(?,?,?,'Trial','Active',?)""",(company_code,company_name,int(user_id),stamp))
+        c.execute("""INSERT INTO companies(
+                         company_code,company_name,owner_user_id,subscription_plan,status,created_at,
+                         subscription_status,ai_credit_limit,ai_credits_used,ai_period_start,seat_limit,demo_used
+                     ) VALUES(?,?,?,'Trial','Active',?,'Trial',0,0,?,1,0)""",
+                  (company_code,company_name,int(user_id),stamp,date.today().replace(day=1).isoformat()))
         cid=int(c.execute("SELECT last_insert_rowid()").fetchone()[0])
         c.execute("""INSERT INTO company_members(company_id,user_id,role,status,joined_at)
                      VALUES(?,?,'Owner','Active',?)""",(cid,int(user_id),stamp))
@@ -2698,6 +2785,8 @@ def create_company_for_user(user_id,company_name):
 
 def company_memberships(user_id):
     return read("""SELECT c.id AS company_id,c.company_code,c.company_name,c.subscription_plan,c.status,
+                         c.subscription_status,c.ai_credit_limit,c.ai_credits_used,c.ai_period_start,
+                         c.seat_limit,c.demo_used,
                          m.role,m.joined_at
                   FROM company_members m
                   JOIN companies c ON c.id=m.company_id
@@ -2707,12 +2796,34 @@ def company_memberships(user_id):
 def create_company_invite(company_id,creator_user_id,role="Employee",email=""):
     role=role if role in ("Owner","Accountant","Manager","Employee") else "Employee"
     email=(email or "").strip().lower()
+    cid=int(company_id)
+
+    company=read("""SELECT seat_limit,subscription_plan,subscription_status
+                    FROM companies WHERE id=?""",(cid,))
+    if company.empty:
+        raise ValueError("Company not found.")
+    seat_limit=max(1,int(company.iloc[0].seat_limit or 1))
+
+    member_count=read("""SELECT COUNT(*) AS n FROM company_members
+                         WHERE company_id=? AND status='Active'""",(cid,))
+    active_members=int(member_count.iloc[0].n)
+
+    open_invites=read("""SELECT COUNT(*) AS n FROM company_invites
+                         WHERE company_id=? AND status='Active'""",(cid,))
+    reserved=int(open_invites.iloc[0].n)
+
+    if active_members + reserved >= seat_limit:
+        raise ValueError(
+            f"This company has reached its {seat_limit}-seat plan limit. "
+            "Upgrade the plan or cancel an unused invite before adding another employee."
+        )
+
     code=_new_invite_code()
     stamp=datetime.now().isoformat(timespec="seconds")
     def f(c):
         c.execute("""INSERT INTO company_invites(invite_code,company_id,invited_email,role,status,created_by_user_id,created_at)
                      VALUES(?,?,?,?, 'Active', ?, ?)""",
-                  (code,int(company_id),email,role,int(creator_user_id),stamp))
+                  (code,cid,email,role,int(creator_user_id),stamp))
     write(f)
     return code
 
@@ -2725,6 +2836,18 @@ def join_company_with_invite(user_id,user_email,invite_code):
     if invited_email and invited_email != (user_email or "").strip().lower():
         raise ValueError("This invite was issued to a different email address.")
     stamp=datetime.now().isoformat(timespec="seconds")
+
+    # Re-check seat availability when the invite is actually redeemed.
+    company=read("SELECT seat_limit FROM companies WHERE id=?",(int(r.company_id),))
+    seat_limit=max(1,int(company.iloc[0].seat_limit or 1)) if not company.empty else 1
+    existing_member=read("""SELECT id FROM company_members
+                            WHERE company_id=? AND user_id=?""",(int(r.company_id),int(user_id)))
+    if existing_member.empty:
+        member_count=read("""SELECT COUNT(*) AS n FROM company_members
+                             WHERE company_id=? AND status='Active'""",(int(r.company_id),))
+        if int(member_count.iloc[0].n) >= seat_limit:
+            raise ValueError("This company's Sullivan plan has no employee seats remaining.")
+
     def f(c):
         exists=c.execute("SELECT id FROM company_members WHERE company_id=? AND user_id=?",
                          (int(r.company_id),int(user_id))).fetchone()
@@ -2738,6 +2861,154 @@ def join_company_with_invite(user_id,user_email,invite_code):
     write(f)
     c=read("SELECT company_code,company_name FROM companies WHERE id=?",(int(r.company_id),))
     return c.iloc[0].to_dict()
+
+
+def v18_company_billing(company_id):
+    d=read("""SELECT id,company_code,company_name,subscription_plan,subscription_status,
+                    ai_credit_limit,ai_credits_used,ai_period_start,seat_limit,demo_used,
+                    stripe_customer_id,stripe_subscription_id
+             FROM companies WHERE id=?""",(int(company_id),))
+    return None if d.empty else d.iloc[0].to_dict()
+
+def v18_refresh_credit_period(company_id):
+    cid=int(company_id)
+    data=v18_company_billing(cid)
+    if not data:
+        return None
+
+    plan=str(data.get("subscription_plan") or "Trial")
+    spec=SULLIVAN_PLANS.get(plan,SULLIVAN_PLANS["Trial"])
+    start=pd.to_datetime(data.get("ai_period_start"),errors="coerce")
+    this_month=date.today().replace(day=1)
+
+    if pd.isna(start) or start.date()!=this_month:
+        def f(c):
+            c.execute("""UPDATE companies
+                         SET ai_period_start=?,ai_credits_used=0,
+                             ai_credit_limit=?,seat_limit=?
+                         WHERE id=?""",
+                      (this_month.isoformat(),int(spec["ai_credits"]),int(spec["seat_limit"]),cid))
+        write(f)
+    return v18_company_billing(cid)
+
+def v18_active_company_id():
+    c=current_company()
+    if not c:
+        return None
+    cid=int(c.get("company_id",0) or 0)
+    return cid if cid>0 else None
+
+def v18_credit_status(company_id=None):
+    cid=int(company_id or v18_active_company_id() or 0)
+    if cid<=0:
+        return {
+            "company_id":None,"plan":"Personal","status":"No company",
+            "limit":0,"used":0,"remaining":0,"seat_limit":1,"demo_used":1
+        }
+    d=v18_refresh_credit_period(cid)
+    if not d:
+        return None
+    limit=int(d.get("ai_credit_limit") or 0)
+    used=int(d.get("ai_credits_used") or 0)
+    return {
+        "company_id":cid,
+        "plan":str(d.get("subscription_plan") or "Trial"),
+        "status":str(d.get("subscription_status") or "Trial"),
+        "limit":limit,
+        "used":used,
+        "remaining":max(0,limit-used),
+        "seat_limit":max(1,int(d.get("seat_limit") or 1)),
+        "demo_used":int(d.get("demo_used") or 0),
+        "company_name":d.get("company_name"),
+        "company_code":d.get("company_code"),
+    }
+
+def v18_log_ai_usage(company_id,action,credits,source="subscription",detail=""):
+    user=current_user() or {}
+    uid=user.get("id")
+    stamp=datetime.now().isoformat(timespec="seconds")
+    write(lambda c:c.execute(
+        """INSERT INTO ai_usage(company_id,user_id,action,credits,source,detail,created_at)
+           VALUES(?,?,?,?,?,?,?)""",
+        (int(company_id),int(uid) if uid else None,str(action),int(credits),str(source),str(detail),stamp)
+    ))
+
+def v18_require_ai_credits(action,credits):
+    cid=v18_active_company_id()
+    if not cid:
+        raise ValueError("Choose or create a company workspace before using Sullivan AI.")
+    status=v18_credit_status(cid)
+    if status["status"]!="Active" or status["plan"]=="Trial":
+        raise ValueError(
+            "This company is on the free preview. Use the one-time Sullivan AI demo "
+            "or choose a paid plan when billing is connected."
+        )
+    if int(status["remaining"]) < int(credits):
+        raise ValueError(
+            f"Not enough Sullivan AI credits. This action needs {credits}; "
+            f"{status['remaining']} remain this billing period."
+        )
+    return cid
+
+def v18_consume_ai_credits(company_id,action,credits,detail=""):
+    cid=int(company_id)
+    credits=int(credits)
+    def f(c):
+        row=c.execute("""SELECT ai_credit_limit,ai_credits_used FROM companies WHERE id=?""",(cid,)).fetchone()
+        if not row:
+            raise ValueError("Company not found.")
+        limit=int(row[0] or 0); used=int(row[1] or 0)
+        if used+credits>limit:
+            raise ValueError("Sullivan AI credit limit reached.")
+        c.execute("UPDATE companies SET ai_credits_used=ai_credits_used+? WHERE id=?",(credits,cid))
+    write(f)
+    v18_log_ai_usage(cid,action,credits,"subscription",detail)
+
+def v18_demo_available(company_id=None):
+    status=v18_credit_status(company_id)
+    return bool(status and status.get("company_id") and not status.get("demo_used"))
+
+def v18_run_demo(description,amount,p):
+    cid=v18_active_company_id()
+    if not cid:
+        raise ValueError("Create or open a company workspace to use the free AI demo.")
+    if not v18_demo_available(cid):
+        raise ValueError("This company has already used its free Sullivan AI demo.")
+    if not key():
+        raise ValueError("Sullivan AI is not configured on this server.")
+
+    client=OpenAI(api_key=key())
+    r=client.responses.parse(
+        model=MODEL,
+        input=[
+            {"role":"system","content":
+             "You are Sullivan AI. Demonstrate conservative bookkeeping classification. "
+             "This is a preview only; do not claim the transaction was posted."},
+            {"role":"user","content":
+             f"Business {p['entity_type']} in {p['region']}, {p['country']}; "
+             f"industry {p['industry']}. Demo transaction: {description}; amount {amount}. "
+             f"Allowed categories: {', '.join(CATEGORIES)}."}
+        ],
+        text_format=Classification
+    ).output_parsed
+
+    cat=r.category if r.category in CATEGORIES else "Needs Review"
+    result={
+        "category":cat,
+        "confidence":float(r.confidence),
+        "explanation":r.explanation,
+        "question":r.question_for_owner or "",
+        "account":CATEGORY_TO_ACCOUNT.get(cat,"6999 Uncategorized Expense"),
+    }
+
+    def f(c):
+        row=c.execute("SELECT demo_used FROM companies WHERE id=?",(cid,)).fetchone()
+        if not row or int(row[0] or 0):
+            raise ValueError("This company has already used its free Sullivan AI demo.")
+        c.execute("UPDATE companies SET demo_used=1 WHERE id=?",(cid,))
+    write(f)
+    v18_log_ai_usage(cid,"free_transaction_demo",0,"free_demo",f"{description} | {amount}")
+    return result
 
 def current_user():
     return st.session_state.get("auth_user")
@@ -2756,12 +3027,12 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V15</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V18</span></div>",unsafe_allow_html=True)
 
 
 
 # ==========================
-# V17.2.2 guest-first access
+# V18.0 guest-first access
 # ==========================
 if "auth_user" not in st.session_state:
     st.session_state["auth_user"] = None
@@ -2777,7 +3048,7 @@ if "v1722_workspace_open" not in st.session_state:
     st.session_state["v1722_workspace_open"] = False
 
 
-# V17.2.2: if Streamlit has a valid Google OIDC identity, turn it into a
+# V18.0: if Streamlit has a valid Google OIDC identity, turn it into a
 # Sullivan account automatically after Google redirects back to the app.
 if _streamlit_oidc_logged_in():
     try:
@@ -3101,7 +3372,18 @@ with st.sidebar:
     with st.expander("✨  Sullivan AI", expanded=True):
         st.caption("Sullivan AI is managed securely by Sullivan. Employees never need an OpenAI API key.")
         if key():
-            st.markdown('<div class="s15-ai-ok">● Sullivan AI is available.</div>',unsafe_allow_html=True)
+            active_c=current_company()
+            if active_c and int(active_c.get("company_id",0) or 0)>0:
+                cs=v18_credit_status(int(active_c["company_id"]))
+                if cs["plan"]=="Trial" and not cs["demo_used"]:
+                    msg="● Sullivan AI is ready · 1 free demo available"
+                elif cs["plan"]=="Trial":
+                    msg="● Sullivan AI ready · choose a plan for more AI"
+                else:
+                    msg=f'● Sullivan AI · {cs["remaining"]:,} credits remaining'
+                st.markdown(f'<div class="s15-ai-ok">{msg}</div>',unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="s15-ai-ok">● Sullivan AI is available.</div>',unsafe_allow_html=True)
         else:
             st.markdown('<div class="s15-ai-off">● Sullivan AI is not configured on this server yet.</div>',unsafe_allow_html=True)
 
@@ -3209,7 +3491,7 @@ div.stButton>button:hover{border-color:#1769E0!important;color:#1769E0!important
 }
 
 
-/* V17.2.2 — readable forms everywhere */
+/* V18.0 — readable forms everywhere */
 .main input,
 .main textarea,
 section.main input,
@@ -3293,7 +3575,7 @@ section.main textarea,
 
 
 
-/* V17.2.2 — sidebar readability fix */
+/* V18.0 — sidebar readability fix */
 section[data-testid="stSidebar"] label,
 section[data-testid="stSidebar"] label p,
 section[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p,
@@ -3312,7 +3594,7 @@ section[data-testid="stSidebar"] div[data-baseweb="select"] span {
 
 
 
-/* V17.2.2 polished Sullivan sidebar */
+/* V18.0 polished Sullivan sidebar */
 section[data-testid="stSidebar"] {
     background:
         linear-gradient(180deg,#061A30 0%,#07223D 55%,#082B4B 100%) !important;
@@ -3492,7 +3774,7 @@ section[data-testid="stSidebar"] [data-testid="stAlert"] * {
 
 
 
-/* V17.2.2 full contrast safety pass */
+/* V18.0 full contrast safety pass */
 
 /* MAIN WORKSPACE */
 [data-testid="stAppViewContainer"] label,
@@ -3580,7 +3862,7 @@ button[aria-label="Help"] svg {
     stroke:#52677B !important;
 }
 
-/* V17.2.2: Streamlit renders help icons differently by widget type.
+/* V18.0: Streamlit renders help icons differently by widget type.
    Force every widget-label help trigger to use the same clean question-mark treatment. */
 [data-testid="stWidgetLabel"] button,
 [data-testid="stWidgetLabel"] [role="button"],
@@ -3768,7 +4050,7 @@ section[data-testid="stSidebar"] [data-testid="stAlert"] * {
     color:#FFFFFF !important;
 }
 
-/* V17.2.2 — FINAL HELP ICON FIX
+/* V18.0 — FINAL HELP ICON FIX
    TextInput/NumberInput have broad button rules above for password/stepper controls.
    Streamlit places label help triggers inside those widget containers too, so those rules
    were repainting the help SVG as a solid dot. Keep this override LAST so help icons
@@ -3865,7 +4147,7 @@ button[data-baseweb="tab"]:not([aria-selected="true"]) p {
 
 
 
-/* V17.2.2 guest-first authentication */
+/* V18.0 guest-first authentication */
 .guest-card{
     background:rgba(255,255,255,.06);
     border:1px solid rgba(255,255,255,.10);
@@ -3918,7 +4200,7 @@ button[data-baseweb="tab"]:not([aria-selected="true"]) p {
 """,unsafe_allow_html=True)
 
 
-main_sections=st.tabs(["Home","Money In","Money Out","Bank","Taxes","Reports","Team","Advanced"])
+main_sections=st.tabs(["Home","Money In","Money Out","Bank","Taxes","Reports","Team","Plan & AI","Advanced"])
 
 
 with main_sections[0]:
@@ -3972,6 +4254,11 @@ with main_sections[6]:
                 st.dataframe(members,use_container_width=True,hide_index=True)
 
             if role in ("Owner","Manager"):
+                billing=v18_credit_status(int(auth_c["company_id"]))
+                seats_used=len(members) if not members.empty else 0
+                st.markdown(f"**Team seats:** {seats_used} / {billing['seat_limit']}")
+                if seats_used >= billing["seat_limit"]:
+                    st.warning("Your current Sullivan plan has no open employee seats.")
                 st.markdown("### Invite employee")
                 inv_email=st.text_input("Employee email",key="v171_invite_email")
                 inv_role=st.selectbox("Role",["Employee","Manager","Accountant"],key="v171_invite_role")
@@ -3990,13 +4277,123 @@ with main_sections[6]:
                 st.info("Only an Owner or Manager can invite employees.")
 
 with main_sections[7]:
+    st.subheader("Plan & AI")
+    st.caption("Your Sullivan membership controls team seats and AI usage. Stripe billing is the next connection step.")
+
+    if not v171_is_signed_in():
+        st.info("Browse freely. Sign in when you're ready to create a company and try Sullivan AI.")
+        if st.button("Sign in to see plans",type="primary",key="v18_plan_signin"):
+            v171_open_auth("Sign in to create a company, try Sullivan AI, and choose a membership.")
+            st.rerun()
+    else:
+        billing_company=current_company()
+        if not billing_company:
+            st.info("You're in your personal workspace. Create or open a company workspace to use company memberships.")
+            st.caption("Use **Manage workspace** in the left sidebar.")
+        else:
+            cid=int(billing_company.get("company_id",0) or 0)
+            if cid<=0:
+                st.info("Personal workspaces don't use company memberships. Create a company from Manage workspace.")
+            else:
+                status=v18_credit_status(cid)
+                members=read("""SELECT COUNT(*) AS n FROM company_members
+                                WHERE company_id=? AND status='Active'""",(cid,))
+                seats_used=int(members.iloc[0].n) if not members.empty else 0
+
+                st.markdown(
+                    f'<div class="auth-note"><b>{status["company_name"]}</b><br>'
+                    f'Company ID: <b>{status["company_code"]}</b> &nbsp; • &nbsp; '
+                    f'Current plan: <b>{status["plan"]}</b></div>',
+                    unsafe_allow_html=True
+                )
+
+                b1,b2,b3,b4=st.columns(4)
+                b1.metric("Plan",status["plan"])
+                b2.metric("AI credits remaining",f'{status["remaining"]:,}')
+                b3.metric("AI credits used",f'{status["used"]:,} / {status["limit"]:,}')
+                b4.metric("Team seats",f'{seats_used} / {status["seat_limit"]}')
+
+                if status["plan"]=="Trial":
+                    st.markdown("### Try Sullivan AI once — free")
+                    if status["demo_used"]:
+                        st.success("✓ This company already used its free Sullivan AI transaction demo.")
+                    else:
+                        st.write(
+                            "Before paying, test Sullivan AI on one small transaction. "
+                            "This preview only suggests a category and explanation — it **does not post anything to your books**."
+                        )
+                        d1,d2=st.columns([2,1])
+                        demo_desc=d1.text_input(
+                            "Transaction description",
+                            value="Home Depot - Milwaukee drill",
+                            key="v18_demo_desc"
+                        )
+                        demo_amt=d2.number_input(
+                            "Amount",
+                            value=-184.72,
+                            step=10.0,
+                            format="%.2f",
+                            key="v18_demo_amount"
+                        )
+
+                        if st.button("✨ Analyze my free demo transaction",type="primary",key="v18_demo_button"):
+                            try:
+                                result=v18_run_demo(demo_desc,demo_amt,p)
+                                st.session_state["v18_demo_result"]=result
+                                st.rerun()
+                            except Exception as e:
+                                st.error(str(e))
+
+                        if st.session_state.get("v18_demo_result"):
+                            result=st.session_state["v18_demo_result"]
+                            st.markdown("#### Sullivan AI result")
+                            r1,r2=st.columns(2)
+                            r1.metric("Suggested category",result["category"])
+                            r2.metric("Suggested account",result["account"])
+                            st.write(f"**Why Sullivan suggested it:** {result['explanation']}")
+                            st.caption(f"Confidence: {result['confidence']:.0%}. Preview only — nothing was posted.")
+
+                st.markdown("### Sullivan plans")
+                p1,p2,p3=st.columns(3)
+                plan_cols=[(p1,"Starter"),(p2,"Business"),(p3,"Pro")]
+                for col,name in plan_cols:
+                    spec=SULLIVAN_PLANS[name]
+                    with col:
+                        st.markdown(f"### {name}")
+                        st.markdown(f"## ${spec['price']}/mo")
+                        st.write(spec["label"])
+                        st.write(f"**{spec['ai_credits']:,}** AI credits / month")
+                        st.write(f"**{spec['seat_limit']}** team seat{'s' if spec['seat_limit']!=1 else ''}")
+                        st.caption("Normal accounting actions do not use AI credits.")
+                        st.button(
+                            "Stripe checkout coming next",
+                            disabled=True,
+                            use_container_width=True,
+                            key=f"v18_plan_{name.lower()}"
+                        )
+
+                st.info(
+                    "V18 builds the membership engine first. No plan is activated by clicking a fake payment button. "
+                    "The next billing version will let Stripe securely activate Starter, Business, or Pro after payment."
+                )
+
+                usage=read("""SELECT action,credits,source,detail,created_at
+                              FROM ai_usage WHERE company_id=?
+                              ORDER BY id DESC LIMIT 25""",(cid,))
+                with st.expander("AI usage history"):
+                    if usage.empty:
+                        st.caption("No Sullivan AI usage recorded yet.")
+                    else:
+                        st.dataframe(usage,use_container_width=True,hide_index=True)
+
+with main_sections[8]:
     accountant_tabs=st.tabs([
         "Import & Analyze","Question Queue","Chart of Accounts","Opening Balances",
         "Saved Ledger","General Ledger","Manual Journals","Corrections / Reversals",
         "Accounting Periods","Smart Close","Integrity Center","Audit Trail","Accountant Export"
     ])
 
-# V17.2.2 navigation / action clarity
+# V18.0 navigation / action clarity
 if st.session_state.get("v13_destination"):
     st.success("You are looking for: **" + st.session_state["v13_destination"] + "**")
     if st.button("Clear destination"):
@@ -4137,7 +4534,7 @@ with home_tabs[0]:
             st.markdown('<div class="panel-v15">'+rows+'</div>',unsafe_allow_html=True)
 
     st.markdown(
-        '<footer class="footer-v15"><span>🛡 Your data is protected &nbsp; • &nbsp; Accounting controls are active &nbsp; • &nbsp; Advanced tools stay available</span><b>◆ Sullivan <small>V17.2.2</small></b></footer>',
+        '<footer class="footer-v15"><span>🛡 Your data is protected &nbsp; • &nbsp; Accounting controls are active &nbsp; • &nbsp; Advanced tools stay available</span><b>◆ Sullivan <small>V18.0</small></b></footer>',
         unsafe_allow_html=True
     )
 
@@ -5761,4 +6158,4 @@ with accountant_tabs[12]:
         with open(path,"rb") as f:st.download_button("Download package",f.read(),"sullivan_v15_4_accountant_package.zip","application/zip")
 
 st.divider()
-st.caption("Sullivan V17.2.2 globally enforces closed accounting periods while retaining V12.3 automatic document numbering.")
+st.caption("Sullivan V18.0 globally enforces closed accounting periods while retaining V12.3 automatic document numbering.")
