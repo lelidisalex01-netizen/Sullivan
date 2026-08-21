@@ -11,7 +11,7 @@ import stripe
 import requests
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V19.4.1", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V19.4.2", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -4115,7 +4115,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.4.1</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.4.2</span></div>",unsafe_allow_html=True)
 
 
 
@@ -5881,6 +5881,226 @@ if _theme_name == "Dark":
 
     ::-webkit-scrollbar-thumb:hover{
         background:#3B5873;
+    }
+
+    /* =========================================================
+       V19.4.2 visibility pass
+       - all editable fields are WHITE with BLACK text
+       - all tab labels are bright/readable
+       - all widget labels remain visible in dark mode
+       ========================================================= */
+
+    /* MAIN NAV TABS + INNER TABS */
+    div[data-baseweb="tab-list"] button[data-baseweb="tab"],
+    div[data-baseweb="tab-list"] button[data-baseweb="tab"] p,
+    div[data-baseweb="tab-list"] button[data-baseweb="tab"] span {
+        color:#EAF2F8!important;
+        -webkit-text-fill-color:#EAF2F8!important;
+        opacity:1!important;
+        font-weight:600!important;
+    }
+
+    div[data-baseweb="tab-list"] button[data-baseweb="tab"][aria-selected="true"],
+    div[data-baseweb="tab-list"] button[data-baseweb="tab"][aria-selected="true"] p,
+    div[data-baseweb="tab-list"] button[data-baseweb="tab"][aria-selected="true"] span {
+        color:#FFFFFF!important;
+        -webkit-text-fill-color:#FFFFFF!important;
+    }
+
+    /* STREAMLIT WIDGET LABELS */
+    [data-testid="stWidgetLabel"],
+    [data-testid="stWidgetLabel"] *,
+    [data-testid="stTextInput"] label,
+    [data-testid="stTextInput"] label *,
+    [data-testid="stTextArea"] label,
+    [data-testid="stTextArea"] label *,
+    [data-testid="stNumberInput"] label,
+    [data-testid="stNumberInput"] label *,
+    [data-testid="stSelectbox"] label,
+    [data-testid="stSelectbox"] label *,
+    [data-testid="stDateInput"] label,
+    [data-testid="stDateInput"] label *,
+    [data-testid="stCheckbox"] label,
+    [data-testid="stCheckbox"] label *,
+    [data-testid="stRadio"] label,
+    [data-testid="stRadio"] label *,
+    [data-testid="stToggle"] label,
+    [data-testid="stToggle"] label * {
+        color:#F2F6FA!important;
+        -webkit-text-fill-color:#F2F6FA!important;
+        opacity:1!important;
+    }
+
+    /* EVERY EDITABLE WRITING FIELD: white background / black text */
+    [data-testid="stTextInput"] input,
+    [data-testid="stNumberInput"] input,
+    [data-testid="stTextArea"] textarea,
+    [data-testid="stDateInput"] input,
+    [data-testid="stTimeInput"] input,
+    div[data-baseweb="input"] input,
+    div[data-baseweb="base-input"] input,
+    textarea {
+        background:#FFFFFF!important;
+        color:#111111!important;
+        -webkit-text-fill-color:#111111!important;
+        caret-color:#111111!important;
+        border-color:#CAD4DE!important;
+    }
+
+    [data-testid="stTextInput"] > div > div,
+    [data-testid="stNumberInput"] > div > div,
+    [data-testid="stTextArea"] > div > div,
+    [data-testid="stDateInput"] > div > div,
+    [data-testid="stTimeInput"] > div > div,
+    div[data-baseweb="input"] > div,
+    div[data-baseweb="base-input"] > div {
+        background:#FFFFFF!important;
+        color:#111111!important;
+        border-color:#CAD4DE!important;
+    }
+
+    /* Input placeholders */
+    [data-testid="stTextInput"] input::placeholder,
+    [data-testid="stTextArea"] textarea::placeholder,
+    [data-testid="stNumberInput"] input::placeholder,
+    input::placeholder,
+    textarea::placeholder {
+        color:#6B7280!important;
+        -webkit-text-fill-color:#6B7280!important;
+        opacity:1!important;
+    }
+
+    /* Number input +/- controls */
+    [data-testid="stNumberInput"] button {
+        background:#F2F5F8!important;
+        color:#111111!important;
+        border-color:#CAD4DE!important;
+    }
+    [data-testid="stNumberInput"] button svg {
+        color:#111111!important;
+        fill:#111111!important;
+        stroke:#111111!important;
+    }
+
+    /* SELECTBOXES: white with black text */
+    [data-testid="stSelectbox"] div[data-baseweb="select"] > div,
+    [data-testid="stMultiSelect"] div[data-baseweb="select"] > div,
+    div[data-baseweb="select"] > div {
+        background:#FFFFFF!important;
+        color:#111111!important;
+        border-color:#CAD4DE!important;
+    }
+
+    [data-testid="stSelectbox"] div[data-baseweb="select"] *,
+    [data-testid="stMultiSelect"] div[data-baseweb="select"] *,
+    div[data-baseweb="select"] span,
+    div[data-baseweb="select"] input {
+        color:#111111!important;
+        -webkit-text-fill-color:#111111!important;
+    }
+
+    [data-testid="stSelectbox"] svg,
+    [data-testid="stMultiSelect"] svg,
+    div[data-baseweb="select"] svg {
+        fill:#111111!important;
+        color:#111111!important;
+    }
+
+    /* Select dropdown menu remains dark, but readable */
+    ul[role="listbox"],
+    div[data-baseweb="menu"] {
+        background:#132338!important;
+        border:1px solid #35516D!important;
+    }
+    li[role="option"],
+    li[role="option"] * {
+        color:#FFFFFF!important;
+        -webkit-text-fill-color:#FFFFFF!important;
+    }
+    li[role="option"]:hover,
+    li[role="option"][aria-selected="true"] {
+        background:#23415F!important;
+    }
+
+    /* AUTOCOMPLETE / SEARCH FIELDS */
+    [data-testid="stTextInput"] svg,
+    [data-baseweb="input"] svg {
+        color:#111111!important;
+        fill:#111111!important;
+    }
+
+    /* DATA EDITOR CELLS / INLINE EDITING */
+    [data-testid="stDataFrame"] input,
+    [data-testid="stDataEditor"] input,
+    [data-testid="stDataFrame"] textarea,
+    [data-testid="stDataEditor"] textarea {
+        background:#FFFFFF!important;
+        color:#111111!important;
+        -webkit-text-fill-color:#111111!important;
+    }
+
+    /* File uploader browse button */
+    [data-testid="stFileUploader"] button {
+        background:#FFFFFF!important;
+        color:#111111!important;
+        border-color:#CAD4DE!important;
+    }
+
+    /* Sidebar business settings fields */
+    [data-testid="stSidebar"] input,
+    [data-testid="stSidebar"] textarea,
+    [data-testid="stSidebar"] div[data-baseweb="select"] > div {
+        background:#FFFFFF!important;
+        color:#111111!important;
+        -webkit-text-fill-color:#111111!important;
+        border-color:#CAD4DE!important;
+    }
+
+    [data-testid="stSidebar"] div[data-baseweb="select"] span,
+    [data-testid="stSidebar"] div[data-baseweb="select"] input {
+        color:#111111!important;
+        -webkit-text-fill-color:#111111!important;
+    }
+
+    [data-testid="stSidebar"] div[data-baseweb="select"] svg {
+        fill:#111111!important;
+        color:#111111!important;
+    }
+
+    /* Generic headings and subheadings inside tabs */
+    [data-testid="stMain"] h1,
+    [data-testid="stMain"] h2,
+    [data-testid="stMain"] h3,
+    [data-testid="stMain"] h4,
+    [data-testid="stMain"] h5,
+    [data-testid="stMain"] h6 {
+        color:#FFFFFF!important;
+        -webkit-text-fill-color:#FFFFFF!important;
+    }
+
+    /* Captions/descriptions should never become near-black */
+    [data-testid="stCaptionContainer"],
+    [data-testid="stCaptionContainer"] *,
+    .stCaption,
+    .stCaption * {
+        color:#AFC0D0!important;
+        -webkit-text-fill-color:#AFC0D0!important;
+    }
+
+    /* Markdown/body text */
+    [data-testid="stMarkdownContainer"] p,
+    [data-testid="stMarkdownContainer"] li,
+    [data-testid="stMarkdownContainer"] strong,
+    [data-testid="stMarkdownContainer"] em {
+        color:#E7EEF5!important;
+    }
+
+    /* Quick-action white buttons intentionally remain white with dark text */
+    .quick-action button,
+    .quick-actions button {
+        background:#FFFFFF!important;
+        color:#122033!important;
+        -webkit-text-fill-color:#122033!important;
     }
     </style>
     """, unsafe_allow_html=True)
