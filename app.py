@@ -2924,7 +2924,7 @@ def v18_company_billing(company_id):
 
     remote_ok = bool(
         remote
-        and remote.get("_diagnostic") not in ("missing_secrets", "http_error", "no_row", "exception")
+        and remote.get("_diagnostic") == "connected"
         and remote.get("plan")
     )
 
@@ -3228,17 +3228,29 @@ def supabase_headers():
 
 
 def v19_supabase_subscription(company_id):
-    """Read the authoritative Sullivan billing record from Supabase."""
+    """
+    Read the authoritative Sullivan billing record from Supabase.
+
+    IMPORTANT:
+    On failure this returns a safe diagnostic dictionary instead of None.
+    That lets Plan & AI show the exact reason without exposing either secret.
+    """
+    cid = int(company_id)
+
     if not supabase_ready():
         missing = []
         if not supabase_url():
             missing.append("SUPABASE_URL")
         if not supabase_secret_key():
             missing.append("SUPABASE_SECRET_KEY")
-        print("Supabase billing disabled; missing Streamlit secret(s): " + ", ".join(missing))
-        return None
 
-    cid = int(company_id)
+        message = "Missing Streamlit secret(s): " + ", ".join(missing)
+        print("Supabase billing disabled | " + message)
+        return {
+            "_diagnostic": "missing_secrets",
+            "_message": message,
+        }
+
     url = (
         f"{supabase_url().rstrip('/')}"
         "/rest/v1/sullivan_subscriptions"
@@ -3246,34 +3258,89 @@ def v19_supabase_subscription(company_id):
     )
 
     try:
-        response = requests.get(url, headers=supabase_headers(), timeout=10)
+        response = requests.get(
+            url,
+            headers=supabase_headers(),
+            timeout=10,
+        )
+
         if response.status_code != 200:
-            print(f"Supabase subscription lookup failed for company {cid}:", response.status_code, response.text)
-            return None
+            # Never print or display the request headers/key.
+            body = (response.text or "").strip()
+            if len(body) > 300:
+                body = body[:300] + "..."
+
+            message = f"Supabase returned HTTP {response.status_code}"
+            if body:
+                message += f": {body}"
+
+            print(f"Supabase lookup failed | company={cid} | {message}")
+            return {
+                "_diagnostic": "http_error",
+                "_message": message,
+            }
+
         rows = response.json()
+
         if not rows:
-            print(f"Supabase subscription lookup returned no row for company {cid}.")
-            return None
-        row = rows[0]
-        print(f"Supabase subscription loaded | company={cid} | plan={row.get('plan')} | status={row.get('subscription_status')}")
+            message = (
+                f"Connected to Supabase, but no subscription row was found "
+                f"for company_id={cid}."
+            )
+            print(message)
+            return {
+                "_diagnostic": "no_row",
+                "_message": message,
+            }
+
+        row = dict(rows[0])
+        row["_diagnostic"] = "connected"
+        row["_message"] = "Subscription row found."
+        print(
+            f"Supabase subscription loaded | company={cid} | "
+            f"plan={row.get('plan')} | status={row.get('subscription_status')}"
+        )
         return row
+
+    except requests.exceptions.Timeout:
+        message = "Supabase connection timed out."
+        print(f"Supabase lookup failed | company={cid} | {message}")
+        return {
+            "_diagnostic": "timeout",
+            "_message": message,
+        }
+
+    except requests.exceptions.RequestException as e:
+        message = f"Supabase network error: {type(e).__name__}"
+        print(f"Supabase lookup failed | company={cid} | {message}: {e}")
+        return {
+            "_diagnostic": "network_error",
+            "_message": message,
+        }
+
     except Exception as e:
-        print(f"Supabase subscription lookup error for company {cid}: {e}")
-        return None
+        message = f"Supabase lookup error: {type(e).__name__}: {e}"
+        print(f"Supabase lookup failed | company={cid} | {message}")
+        return {
+            "_diagnostic": "exception",
+            "_message": message,
+        }
 
 
 def v19_billing_diagnostic(company_id):
     """Return safe billing diagnostics without exposing secrets."""
-    remote = v19_supabase_subscription(company_id)
+    remote = v19_supabase_subscription(company_id) or {}
+    state = str(remote.get("_diagnostic") or "unknown")
+
     return {
         "company_id": int(company_id),
         "supabase_configured": supabase_ready(),
-        "state": remote.get("_diagnostic", "connected") if remote else "unknown",
-        "message": remote.get("_message", "") if remote else "",
-        "remote_plan": remote.get("plan") if remote and not remote.get("_diagnostic") in ("missing_secrets","http_error","no_row","exception") else None,
-        "remote_status": remote.get("subscription_status") if remote and not remote.get("_diagnostic") in ("missing_secrets","http_error","no_row","exception") else None,
-        "remote_ai_credits": remote.get("ai_credits") if remote and not remote.get("_diagnostic") in ("missing_secrets","http_error","no_row","exception") else None,
-        "remote_seat_limit": remote.get("seat_limit") if remote and not remote.get("_diagnostic") in ("missing_secrets","http_error","no_row","exception") else None,
+        "state": state,
+        "message": str(remote.get("_message") or ""),
+        "remote_plan": remote.get("plan") if state == "connected" else None,
+        "remote_status": remote.get("subscription_status") if state == "connected" else None,
+        "remote_ai_credits": remote.get("ai_credits") if state == "connected" else None,
+        "remote_seat_limit": remote.get("seat_limit") if state == "connected" else None,
     }
 
 def stripe_secret_key():
@@ -3479,7 +3546,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.1</span></div>",unsafe_allow_html=True)
 
 
 
@@ -4820,10 +4887,14 @@ with main_sections[7]:
                         f'{int(billing_diag["remote_seat_limit"] or 1)} seats'
                     )
                 else:
-                    st.error("❌ Supabase billing sync is not connected.")
+                    st.error(
+                        "❌ Supabase billing sync is not connected.\n\n"
+                        f"**Reason:** {billing_diag['message'] or billing_diag['state']}"
+                    )
                     st.caption(
                         f'Company {billing_diag["company_id"]} • '
-                        f'{billing_diag["message"] or billing_diag["state"]}'
+                        f'State: {billing_diag["state"]} • '
+                        f'Secrets detected: {"Yes" if billing_diag["supabase_configured"] else "No"}'
                     )
 
                 if status["plan"]=="Trial":
