@@ -13,7 +13,7 @@ import stripe
 import requests
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V20.2.1", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V20.3", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -149,6 +149,7 @@ AI_CREDIT_COSTS = {
     "accounting_question": 2,
     "reconciliation_assist": 5,
     "month_end_review": 15,
+    "business_advisor": 8,
 }
 
 RULES = [
@@ -4186,7 +4187,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V20.2.1</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V20.3</span></div>",unsafe_allow_html=True)
 
 
 
@@ -7199,6 +7200,266 @@ def v202_render_financial_position(snapshot, is_dark):
     components.html(html,height=365,scrolling=False)
 
 
+
+# ============================================================
+# V20.3 — PERSONALIZED SULLIVAN BUSINESS ADVISOR
+# ============================================================
+def v203_advisor_focus_areas(snapshot):
+    areas = []
+    if snapshot["ar_overdue"] > 0:
+        areas.append(("Cash flow", "Collect overdue customer balances", "Receivables"))
+    if snapshot["profit"] < 0:
+        areas.append(("Profitability", "Improve current profitability", "Profit"))
+    if snapshot["expense_change"] is not None and snapshot["expense_change"] > 10:
+        areas.append(("Expenses", "Control rising operating costs", "Expenses"))
+    if snapshot["total_debt"] > 0:
+        areas.append(("Debt", "Review debt and repayment strategy", "Debt"))
+    if snapshot["revenue_change"] is not None and snapshot["revenue_change"] < 0:
+        areas.append(("Revenue", "Strengthen revenue momentum", "Revenue"))
+    if snapshot["cash"] > 0:
+        areas.append(("Planning", "Plan the next use of business cash", "Planning"))
+
+    defaults = [
+        ("Growth", "Grow revenue responsibly", "Growth"),
+        ("Cash flow", "Strengthen cash reserves", "Cash"),
+        ("Expansion", "Prepare for hiring or expansion", "Expansion"),
+        ("Overall", "Get a complete business review", "Overall"),
+    ]
+    seen = {a[0] for a in areas}
+    for item in defaults:
+        if item[0] not in seen:
+            areas.append(item)
+    return areas[:6]
+
+
+def v203_advisor_context(snapshot, focus, answers):
+    trend = snapshot["trend"].to_dict("records") if isinstance(snapshot.get("trend"), pd.DataFrame) else []
+    return {
+        "focus": focus,
+        "business_health_score": snapshot["health_score"],
+        "current_month": {
+            "revenue": snapshot["revenue"],
+            "expenses": snapshot["expenses"],
+            "profit": snapshot["profit"],
+            "cash": snapshot["cash"],
+        },
+        "changes_vs_prior_month_percent": {
+            "revenue": snapshot["revenue_change"],
+            "expenses": snapshot["expense_change"],
+            "profit": snapshot["profit_change"],
+        },
+        "working_capital": {
+            "accounts_receivable_open": snapshot["ar_open"],
+            "accounts_receivable_overdue": snapshot["ar_overdue"],
+            "accounts_payable_open": snapshot["ap_open"],
+            "accounts_payable_overdue": snapshot["ap_overdue"],
+        },
+        "finance": {
+            "total_debt": snapshot["total_debt"],
+            "monthly_debt_service": snapshot["monthly_debt_service"],
+            "interest_ytd": snapshot["interest_ytd"],
+            "asset_book_value": snapshot["asset_book"],
+        },
+        "largest_expense_category": snapshot["top_expense_category"],
+        "largest_expense_amount": snapshot["top_expense_amount"],
+        "six_month_trend": trend,
+        "owner_answers": answers,
+    }
+
+
+def v203_run_business_advisor(snapshot, focus, answers):
+    if not key():
+        raise ValueError("Sullivan AI is not configured on this server.")
+
+    credit_cost = AI_CREDIT_COSTS["business_advisor"]
+    company_id = v18_require_ai_credits("business_advisor", credit_cost)
+    context = v203_advisor_context(snapshot, focus, answers)
+
+    instructions = """
+You are Sullivan Business Advisor, an AI business-analysis feature inside Sullivan Accounting.
+Analyze ONLY the business facts provided in the structured context and clearly separate:
+1) facts from Sullivan records,
+2) your analysis/inference,
+3) your suggestions.
+
+Create useful, practical guidance for a small-business owner. Do not invent missing numbers.
+Do not claim certainty about future results. Do not present yourself as a CPA, lawyer,
+investment adviser, lender, or tax professional.
+
+Return a concise report with exactly these headings:
+## Executive read
+## What Sullivan sees
+## Top priorities
+## Suggested 30-day plan
+## Watch closely
+
+Under Top priorities, give 3 priorities ranked #1, #2, #3. For each priority include:
+- Why it matters
+- The Sullivan data that triggered it
+- A practical next action
+
+Use the owner's optional answers when supplied. If an answer is blank, do not assume it.
+For consequential tax, legal, lending, or investment decisions, frame the recommendation
+as business-planning guidance and recommend professional confirmation where appropriate.
+"""
+
+    client = OpenAI(api_key=key())
+    response = client.responses.create(
+        model=MODEL,
+        instructions=instructions,
+        input=json.dumps(context, default=str),
+        max_output_tokens=1300,
+    )
+    answer = (getattr(response, "output_text", "") or "").strip()
+    if not answer:
+        raise ValueError("Sullivan could not generate the business analysis.")
+
+    # Only consume credits after a successful response.
+    v18_consume_ai_credits(
+        company_id,
+        "business_advisor",
+        credit_cost,
+        f"Personalized business advisor | focus={focus}"
+    )
+    return answer
+
+
+def v203_render_advisor(snapshot, is_dark):
+    card_bg = "#102338" if is_dark else "#FFFFFF"
+    soft_bg = "#0A1828" if is_dark else "#F6FAFD"
+    border = "#294763" if is_dark else "#DCE8F2"
+    text_main = "#F7FBFF" if is_dark else "#102A43"
+    text_muted = "#9FB4C8" if is_dark else "#6F8295"
+
+    score = snapshot["health_score"]
+    if score >= 80:
+        accent, label = "#22C879", "Strong foundation"
+    elif score >= 65:
+        accent, label = "#2F80ED", "Healthy with opportunities"
+    elif score >= 45:
+        accent, label = "#F4A11A", "A few areas deserve attention"
+    else:
+        accent, label = "#F25563", "Priority improvements available"
+
+    st.markdown(
+        f"""
+        <div style="
+            background:{card_bg};border:1px solid {border};border-radius:24px;
+            padding:20px 22px;margin:18px 0 14px 0;
+            box-shadow:0 12px 30px rgba(0,0,0,.06);
+        ">
+          <div style="display:flex;align-items:center;gap:15px;flex-wrap:wrap;">
+            <div style="
+                width:58px;height:58px;border-radius:999px;background:{soft_bg};
+                border:5px solid {accent};display:flex;align-items:center;justify-content:center;
+                color:{text_main};font-weight:900;font-size:1.08rem;
+            ">{score}</div>
+            <div style="flex:1;min-width:230px;">
+              <div style="color:{text_muted};font-size:.72rem;font-weight:850;letter-spacing:.09em;text-transform:uppercase;">
+                Sullivan Business Advisor
+              </div>
+              <div style="color:{text_main};font-size:1.2rem;font-weight:900;margin-top:3px;">{label}</div>
+              <div style="color:{text_muted};font-size:.84rem;line-height:1.45;margin-top:4px;">
+                Get personalized suggestions using your business score and the financial records in this workspace.
+              </div>
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    areas = v203_advisor_focus_areas(snapshot)
+    st.markdown("#### What would you like Sullivan to focus on?")
+    st.caption("Choose an area or ask for an overall review.")
+
+    cols = st.columns(3)
+    selected = st.session_state.get("v203_advisor_focus", areas[0][0] if areas else "Overall")
+
+    for idx, (title, subtitle, _) in enumerate(areas):
+        with cols[idx % 3]:
+            active = selected == title
+            if st.button(
+                f"{'● ' if active else ''}{title}\n\n{subtitle}",
+                key=f"v203_focus_{idx}",
+                width="stretch",
+                type="primary" if active else "secondary",
+            ):
+                st.session_state["v203_advisor_focus"] = title
+                selected = title
+                st.rerun()
+
+    selected = st.session_state.get("v203_advisor_focus", selected)
+
+    st.markdown("#### Make the advice more precise")
+    st.caption("Optional — Sullivan already has your financial data. Answer only what you want to share.")
+
+    with st.expander("Answer a few business-planning questions", expanded=False):
+        goal = st.text_input(
+            "What is your biggest goal right now?",
+            placeholder="e.g. grow revenue, build cash reserves, open another location",
+            key="v203_goal"
+        )
+        style = st.selectbox(
+            "How do you want to operate right now?",
+            ["Not specified","Aggressive growth","Balanced growth","Conservative / protect cash"],
+            key="v203_style"
+        )
+        reserve = st.text_input(
+            "Do you have a minimum cash reserve you want to protect?",
+            placeholder="Optional — e.g. $25,000 or 3 months of expenses",
+            key="v203_reserve"
+        )
+        upcoming = st.text_area(
+            "Any major decisions or expenses coming up?",
+            placeholder="Hiring, equipment, vehicle, loan, expansion, large customer payment, etc.",
+            key="v203_upcoming"
+        )
+        constraints = st.text_area(
+            "Anything Sullivan should avoid recommending?",
+            placeholder="Optional — expenses you cannot cut, debt you cannot refinance, etc.",
+            key="v203_constraints"
+        )
+
+    answers = {
+        "biggest_goal": goal,
+        "operating_style": "" if style == "Not specified" else style,
+        "minimum_cash_reserve": reserve,
+        "upcoming_decisions_or_expenses": upcoming,
+        "constraints": constraints,
+    }
+
+    status = v18_credit_status()
+    if status and status.get("plan") != "Trial":
+        st.caption(f"AI Credits remaining this billing period: **{status.get('remaining', 0):,}**")
+
+    if st.button(
+        "✨ Generate personalized Sullivan suggestions",
+        type="primary",
+        key="v203_generate_advice",
+        width="stretch"
+    ):
+        try:
+            with st.spinner("Sullivan is reviewing your business…"):
+                result = v203_run_business_advisor(snapshot, selected, answers)
+            st.session_state["v203_last_advice"] = result
+            st.session_state["v203_last_focus"] = selected
+            st.success("Personalized business review ready.")
+        except Exception as e:
+            st.error(str(e))
+
+    if st.session_state.get("v203_last_advice"):
+        st.markdown("---")
+        st.markdown(
+            f"### Personalized review · {st.session_state.get('v203_last_focus','Overall')}"
+        )
+        st.markdown(st.session_state["v203_last_advice"])
+        st.caption(
+            "Suggestions are generated from the records and optional context available to Sullivan. "
+            "Review important tax, legal, lending, and investment decisions with the appropriate professional."
+        )
+
+
 def v202_render_business_intelligence():
     st.subheader("Business Intelligence")
     st.caption(
@@ -7280,8 +7541,8 @@ def v202_render_business_intelligence():
     k7.metric("Asset book value", v20_money(s["asset_book"]))
     k8.metric("Interest YTD", v20_money(s["interest_ytd"]))
 
-    overview_tab, trends_tab, attention_tab = st.tabs([
-        "Executive Overview","Trends","What Needs Attention"
+    overview_tab, trends_tab, attention_tab, advisor_tab = st.tabs([
+        "Executive Overview","Trends","What Needs Attention","Business Advisor"
     ])
 
     with overview_tab:
@@ -7377,6 +7638,10 @@ def v202_render_business_intelligence():
         st.caption(
             "The Sullivan Business Health score is an internal management indicator, not a credit score, valuation, audit opinion, or professional financial advice."
         )
+
+
+    with advisor_tab:
+        v203_render_advisor(s, is_dark)
 
 
 def v20_render_finance():
