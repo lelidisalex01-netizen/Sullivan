@@ -11,7 +11,7 @@ import stripe
 import requests
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V19.4.2", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V19.4.3", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -4115,7 +4115,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.4.2</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.4.3</span></div>",unsafe_allow_html=True)
 
 
 
@@ -6102,6 +6102,86 @@ if _theme_name == "Dark":
         color:#122033!important;
         -webkit-text-fill-color:#122033!important;
     }
+
+
+    /* V19.4.3 — dark-mode hint/help text */
+    [data-testid="stAlert"] {
+        background:#13263A!important;
+        border:1px solid #35516D!important;
+    }
+
+    [data-testid="stAlert"] *,
+    [data-testid="stAlert"] p,
+    [data-testid="stAlert"] strong,
+    [data-testid="stAlert"] li,
+    [data-testid="stAlert"] h1,
+    [data-testid="stAlert"] h2,
+    [data-testid="stAlert"] h3,
+    [data-testid="stAlert"] h4 {
+        color:#F2F6FA!important;
+        -webkit-text-fill-color:#F2F6FA!important;
+        opacity:1!important;
+    }
+
+    [data-testid="stAlert"] svg {
+        color:#75B4FF!important;
+        fill:currentColor!important;
+        stroke:currentColor!important;
+    }
+
+    /* Help text beneath/beside widgets */
+    [data-testid="stTooltipIcon"],
+    [data-testid="stTooltipIcon"] svg {
+        color:#AFC0D0!important;
+        fill:#AFC0D0!important;
+        stroke:#AFC0D0!important;
+    }
+
+    .st-emotion-cache-1pbsqtx,
+    [data-testid="InputInstructions"],
+    [data-testid="InputInstructions"] *,
+    [data-testid="stFileUploader"] small,
+    [data-testid="stFileUploader"] small * {
+        color:#B8C7D5!important;
+        -webkit-text-fill-color:#B8C7D5!important;
+        opacity:1!important;
+    }
+
+    /* Dashboard metric labels, especially under the cash outlook chart */
+    [data-testid="stMetric"] {
+        background:#132338!important;
+        border:1px solid #35516D!important;
+        border-radius:14px!important;
+        padding:14px 16px!important;
+    }
+
+    [data-testid="stMetricLabel"],
+    [data-testid="stMetricLabel"] *,
+    [data-testid="stMetricLabel"] p {
+        color:#BFD0DF!important;
+        -webkit-text-fill-color:#BFD0DF!important;
+        opacity:1!important;
+        font-weight:600!important;
+    }
+
+    [data-testid="stMetricValue"],
+    [data-testid="stMetricValue"] *,
+    [data-testid="stMetricValue"] div {
+        color:#FFFFFF!important;
+        -webkit-text-fill-color:#FFFFFF!important;
+        opacity:1!important;
+    }
+
+    /* General explanatory text in custom dark cards */
+    .panel-v15 p,
+    .panel-v15 span,
+    .auth-note p,
+    .auth-note span,
+    .workspace-card p,
+    .workspace-card span {
+        color:#C7D5E2!important;
+        -webkit-text-fill-color:#C7D5E2!important;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -6721,19 +6801,110 @@ with home_tabs[0]:
         st.markdown('<div class="section-heading">30-day cash outlook</div>',unsafe_allow_html=True)
         forecast=v14_cash_forecast(30)
         try:
-            melted=forecast.melt("date",value_vars=["Cash balance","Money in","Money out"],var_name="Series",value_name="Amount")
-            chart=alt.Chart(melted).mark_line(strokeWidth=2.4).encode(
-                x=alt.X("date:T",title=None,axis=alt.Axis(labelColor="#63788C",grid=False)),
-                y=alt.Y("Amount:Q",title=None,axis=alt.Axis(labelColor="#63788C",gridColor="#EAF0F6")),
+            melted=forecast.melt(
+                "date",
+                value_vars=["Cash balance","Money in","Money out"],
+                var_name="Series",
+                value_name="Amount"
+            )
+
+            is_dark = st.session_state.get("v19_ui_theme") == "Dark"
+            chart_bg = "#111F30" if is_dark else "#FFFFFF"
+            axis_text = "#DCE6EF" if is_dark else "#63788C"
+            grid_color = "#29415A" if is_dark else "#EAF0F6"
+            legend_text = "#E8F0F7" if is_dark else "#425B72"
+
+            nearest = alt.selection_point(
+                nearest=True,
+                on="pointerover",
+                fields=["date"],
+                empty=False
+            )
+
+            base = alt.Chart(melted).encode(
+                x=alt.X(
+                    "date:T",
+                    title=None,
+                    axis=alt.Axis(
+                        format="%b %d",
+                        labelColor=axis_text,
+                        labelAngle=0,
+                        tickColor=grid_color,
+                        domainColor=grid_color,
+                        grid=False,
+                        labelPadding=8
+                    )
+                ),
+                y=alt.Y(
+                    "Amount:Q",
+                    title=None,
+                    axis=alt.Axis(
+                        format="$,.0f",
+                        labelColor=axis_text,
+                        tickColor=grid_color,
+                        domainColor=grid_color,
+                        gridColor=grid_color,
+                        gridOpacity=0.55,
+                        labelPadding=8
+                    )
+                ),
                 color=alt.Color(
                     "Series:N",
-                    scale=alt.Scale(domain=["Money in","Money out","Cash balance"],range=["#20A65A","#E9344E","#1769E0"]),
-                    legend=alt.Legend(orient="top",title=None,labelColor="#425B72")
+                    scale=alt.Scale(
+                        domain=["Money in","Money out","Cash balance"],
+                        range=["#34C978","#FF6673","#4B9BFF"]
+                    ),
+                    legend=alt.Legend(
+                        orient="top",
+                        title=None,
+                        labelColor=legend_text,
+                        symbolStrokeWidth=4,
+                        labelFontSize=12
+                    )
                 )
-            ).properties(height=245)
-            st.altair_chart(chart,use_container_width=True)
+            )
+
+            lines = base.mark_line(strokeWidth=3).encode(
+                tooltip=[
+                    alt.Tooltip("date:T", title="Date", format="%b %d, %Y"),
+                    alt.Tooltip("Series:N", title="Series"),
+                    alt.Tooltip("Amount:Q", title="Amount", format="$,.2f"),
+                ]
+            )
+
+            points = base.mark_point(
+                filled=True,
+                size=70,
+                strokeWidth=1.5
+            ).encode(
+                opacity=alt.condition(nearest, alt.value(1), alt.value(0))
+            )
+
+            selectors = alt.Chart(melted).mark_point(opacity=0).encode(
+                x="date:T"
+            ).add_params(nearest)
+
+            rule = alt.Chart(melted).mark_rule(
+                strokeDash=[4,4],
+                color="#7E94A8"
+            ).encode(
+                x="date:T"
+            ).transform_filter(nearest)
+
+            chart = (lines + points + selectors + rule).properties(
+                height=285,
+                background=chart_bg
+            ).configure_view(
+                stroke=grid_color,
+                strokeWidth=1
+            ).configure_axis(
+                titleColor=axis_text
+            )
+
+            st.altair_chart(chart, width="stretch")
+            st.caption("Hover over the chart to see the exact projected amount for each day.")
         except Exception:
-            st.line_chart(forecast.set_index("date")[["Cash balance"]],height=245)
+            st.line_chart(forecast.set_index("date")[["Cash balance"]],height=285)
 
         projected=float(forecast["Cash balance"].iloc[-1]) if not forecast.empty else m["bank"]
         x,y,z=st.columns(3)
