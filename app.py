@@ -7,12 +7,13 @@ import streamlit as st
 from io import BytesIO
 from dotenv import load_dotenv, set_key
 from openai import OpenAI
+import stripe
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V18.2", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V18.3", page_icon="S", layout="wide")
 
 
-# Sullivan V18.2 visual system: calm navy + blue + mint + warm amber.
+# Sullivan V18.3 visual system: calm navy + blue + mint + warm amber.
 APP_DIR = Path(__file__).resolve().parent
 ENV_PATH = APP_DIR / ".env"
 DB_PATH = APP_DIR / "sullivan.db"
@@ -2581,7 +2582,7 @@ def v17_init_auth_tables():
             used_by_user_id INTEGER,
             used_at TEXT
         )""")
-        # V18.2 migrations for Google/OIDC identities.
+        # V18.3 migrations for Google/OIDC identities.
         user_cols = [r[1] for r in c.execute("PRAGMA table_info(app_users)").fetchall()]
         if "auth_provider" not in user_cols:
             c.execute("ALTER TABLE app_users ADD COLUMN auth_provider TEXT DEFAULT 'email'")
@@ -3126,6 +3127,212 @@ def v18_save_enterprise_quote(company_id,seats,expected_ai_usage,estimate,summar
                    str(expected_ai_usage),float(estimate),str(summary),stamp))
     write(f)
 
+
+# ==========================
+# Sullivan V18.3 Stripe Sandbox
+# ==========================
+
+SULLIVAN_PUBLIC_URL = "https://sullivan-accounting.streamlit.app"
+
+def _secret_value(name, default=""):
+    """
+    Read deployment secrets without exposing them in the UI.
+    Supports Streamlit Secrets first, then normal environment variables.
+    """
+    try:
+        value = st.secrets.get(name, default)
+        if value:
+            return str(value).strip()
+    except Exception:
+        pass
+    return str(os.getenv(name, default) or "").strip()
+
+def stripe_secret_key():
+    return _secret_value("STRIPE_SECRET_KEY")
+
+def stripe_price_id(plan_name):
+    mapping = {
+        "Starter": "STRIPE_PRICE_STARTER",
+        "Business": "STRIPE_PRICE_BUSINESS",
+        "Pro": "STRIPE_PRICE_PRO",
+        "Accounting Firm": "STRIPE_PRICE_ACCOUNTING_FIRM",
+    }
+    secret_name = mapping.get(plan_name)
+    return _secret_value(secret_name) if secret_name else ""
+
+def stripe_checkout_ready(plan_name=None):
+    if not stripe_secret_key():
+        return False
+    if plan_name:
+        return bool(stripe_price_id(plan_name))
+    return all(stripe_price_id(x) for x in ("Starter","Business","Pro","Accounting Firm"))
+
+def v183_create_checkout_session(company_id, plan_name):
+    """
+    Create a Stripe Checkout subscription session for the signed-in company.
+    The company/plan identity is placed in Stripe metadata and verified again
+    after Stripe redirects back to Sullivan.
+    """
+    if plan_name not in ("Starter","Business","Pro","Accounting Firm"):
+        raise ValueError("That Sullivan plan is not available through standard checkout.")
+
+    user = current_user()
+    company = current_company()
+    if not user:
+        raise ValueError("Sign in before starting checkout.")
+    if not company or int(company.get("company_id",0) or 0) != int(company_id):
+        raise ValueError("Open the company workspace you want to subscribe before checkout.")
+
+    secret = stripe_secret_key()
+    price_id = stripe_price_id(plan_name)
+    if not secret:
+        raise ValueError("Stripe is not configured on this Sullivan deployment.")
+    if not price_id:
+        raise ValueError(f"Stripe Price ID for {plan_name} is missing.")
+
+    stripe.api_key = secret
+
+    success_url = (
+        SULLIVAN_PUBLIC_URL
+        + "/?checkout=success&session_id={CHECKOUT_SESSION_ID}"
+    )
+    cancel_url = SULLIVAN_PUBLIC_URL + "/?checkout=cancelled"
+
+    session = stripe.checkout.Session.create(
+        mode="subscription",
+        line_items=[{"price": price_id, "quantity": 1}],
+        customer_email=str(user.get("email") or ""),
+        success_url=success_url,
+        cancel_url=cancel_url,
+        allow_promotion_codes=True,
+        billing_address_collection="auto",
+        client_reference_id=str(company_id),
+        metadata={
+            "sullivan_company_id": str(company_id),
+            "sullivan_company_code": str(company.get("company_code") or ""),
+            "sullivan_plan": plan_name,
+            "sullivan_user_id": str(user.get("id") or ""),
+        },
+        subscription_data={
+            "metadata": {
+                "sullivan_company_id": str(company_id),
+                "sullivan_plan": plan_name,
+            }
+        },
+    )
+
+    if not getattr(session, "url", None):
+        raise RuntimeError("Stripe created the session but did not return a Checkout URL.")
+    return session.url
+
+def v183_activate_paid_plan(company_id, plan_name, stripe_customer_id="", stripe_subscription_id=""):
+    if plan_name not in SULLIVAN_PLANS or plan_name in ("Trial","Enterprise"):
+        raise ValueError("Invalid paid Sullivan plan.")
+
+    spec = SULLIVAN_PLANS[plan_name]
+    period_start = date.today().replace(day=1).isoformat()
+
+    def f(c):
+        c.execute(
+            """UPDATE companies
+               SET subscription_plan=?,
+                   subscription_status='Active',
+                   ai_credit_limit=?,
+                   ai_credits_used=0,
+                   ai_period_start=?,
+                   seat_limit=?,
+                   stripe_customer_id=?,
+                   stripe_subscription_id=?
+               WHERE id=?""",
+            (
+                plan_name,
+                int(spec["ai_credits"]),
+                period_start,
+                int(spec["seat_limit"]),
+                str(stripe_customer_id or ""),
+                str(stripe_subscription_id or ""),
+                int(company_id),
+            )
+        )
+    write(f)
+
+def v183_verify_checkout_return(session_id):
+    """
+    Retrieve the Checkout Session directly from Stripe.
+    Never trust plan/company values supplied only by the browser query string.
+    """
+    if not session_id:
+        raise ValueError("Stripe did not provide a Checkout Session ID.")
+
+    secret = stripe_secret_key()
+    if not secret:
+        raise ValueError("Stripe is not configured.")
+
+    user = current_user()
+    company = current_company()
+    if not user or not company:
+        raise ValueError("Sign in and open the company workspace used for checkout.")
+
+    stripe.api_key = secret
+    session = stripe.checkout.Session.retrieve(
+        session_id,
+        expand=["subscription"],
+    )
+
+    metadata = dict(getattr(session, "metadata", {}) or {})
+    expected_company_id = int(company.get("company_id",0) or 0)
+    returned_company_id = int(metadata.get("sullivan_company_id") or 0)
+    plan_name = str(metadata.get("sullivan_plan") or "")
+
+    if returned_company_id != expected_company_id:
+        raise ValueError("This Stripe checkout belongs to a different Sullivan company.")
+
+    if plan_name not in ("Starter","Business","Pro","Accounting Firm"):
+        raise ValueError("Stripe returned an unknown Sullivan plan.")
+
+    # Stripe Checkout for subscriptions normally returns complete + paid/no_payment_required.
+    checkout_status = str(getattr(session, "status", "") or "")
+    payment_status = str(getattr(session, "payment_status", "") or "")
+    if checkout_status != "complete":
+        raise ValueError("Stripe Checkout is not complete yet.")
+    if payment_status not in ("paid","no_payment_required"):
+        raise ValueError(f"Stripe has not confirmed payment yet ({payment_status or 'unknown'}).")
+
+    customer_id = str(getattr(session, "customer", "") or "")
+    subscription_obj = getattr(session, "subscription", None)
+    subscription_id = ""
+    subscription_status = ""
+
+    if isinstance(subscription_obj, str):
+        subscription_id = subscription_obj
+        sub = stripe.Subscription.retrieve(subscription_id)
+        subscription_status = str(getattr(sub, "status", "") or "")
+    elif subscription_obj is not None:
+        subscription_id = str(getattr(subscription_obj, "id", "") or "")
+        subscription_status = str(getattr(subscription_obj, "status", "") or "")
+
+    if not subscription_id:
+        raise ValueError("Stripe did not return a subscription for this checkout.")
+
+    if subscription_status and subscription_status not in ("active","trialing"):
+        raise ValueError(f"Stripe subscription status is {subscription_status}, so Sullivan did not activate it.")
+
+    v183_activate_paid_plan(
+        expected_company_id,
+        plan_name,
+        stripe_customer_id=customer_id,
+        stripe_subscription_id=subscription_id,
+    )
+
+    return {
+        "plan": plan_name,
+        "company_id": expected_company_id,
+        "customer_id": customer_id,
+        "subscription_id": subscription_id,
+        "payment_status": payment_status,
+        "subscription_status": subscription_status or "active",
+    }
+
 def current_user():
     return st.session_state.get("auth_user")
 
@@ -3148,7 +3355,7 @@ st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center 
 
 
 # ==========================
-# V18.2 guest-first access
+# V18.3 guest-first access
 # ==========================
 if "auth_user" not in st.session_state:
     st.session_state["auth_user"] = None
@@ -3164,7 +3371,7 @@ if "v1722_workspace_open" not in st.session_state:
     st.session_state["v1722_workspace_open"] = False
 
 
-# V18.2: if Streamlit has a valid Google OIDC identity, turn it into a
+# V18.3: if Streamlit has a valid Google OIDC identity, turn it into a
 # Sullivan account automatically after Google redirects back to the app.
 if _streamlit_oidc_logged_in():
     try:
@@ -3228,6 +3435,46 @@ def _v171_file_uploader(label, *args, **kwargs):
 st.file_uploader = _v171_file_uploader
 
 p0=profile()
+
+# V18.3: Handle Stripe Checkout redirect safely.
+try:
+    checkout_state = st.query_params.get("checkout", "")
+except Exception:
+    checkout_state = ""
+
+if checkout_state == "success":
+    session_id = st.query_params.get("session_id", "")
+    if v171_is_signed_in() and current_company():
+        if st.session_state.get("v183_verified_session") != session_id:
+            try:
+                verified = v183_verify_checkout_return(session_id)
+                st.session_state["v183_verified_session"] = session_id
+                st.session_state["v183_checkout_result"] = verified
+                # Refresh the session's company plan display.
+                refreshed = v18_company_billing(verified["company_id"])
+                if refreshed and st.session_state.get("auth_company"):
+                    st.session_state["auth_company"]["subscription_plan"] = refreshed.get("subscription_plan")
+                st.query_params.clear()
+                st.rerun()
+            except Exception as e:
+                st.error(f"Stripe returned to Sullivan, but the subscription could not be activated: {e}")
+    else:
+        v171_open_auth("Your Stripe checkout succeeded. Sign in to the same Sullivan account to finish activating the plan.")
+
+elif checkout_state == "cancelled":
+    st.warning("Stripe checkout was cancelled. Nothing was charged and your Sullivan plan was not changed.")
+    try:
+        st.query_params.clear()
+    except Exception:
+        pass
+
+if st.session_state.get("v183_checkout_result"):
+    result = st.session_state.pop("v183_checkout_result")
+    st.success(
+        f"✅ Stripe confirmed your **{result['plan']}** subscription. "
+        "Sullivan activated the plan and reset its monthly AI allowance."
+    )
+
 
 # Guest sign-in panel opens only when needed.
 if st.session_state.get("v171_auth_open"):
@@ -3607,7 +3854,7 @@ div.stButton>button:hover{border-color:#1769E0!important;color:#1769E0!important
 }
 
 
-/* V18.2 — readable forms everywhere */
+/* V18.3 — readable forms everywhere */
 .main input,
 .main textarea,
 section.main input,
@@ -3691,7 +3938,7 @@ section.main textarea,
 
 
 
-/* V18.2 — sidebar readability fix */
+/* V18.3 — sidebar readability fix */
 section[data-testid="stSidebar"] label,
 section[data-testid="stSidebar"] label p,
 section[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p,
@@ -3710,7 +3957,7 @@ section[data-testid="stSidebar"] div[data-baseweb="select"] span {
 
 
 
-/* V18.2 polished Sullivan sidebar */
+/* V18.3 polished Sullivan sidebar */
 section[data-testid="stSidebar"] {
     background:
         linear-gradient(180deg,#061A30 0%,#07223D 55%,#082B4B 100%) !important;
@@ -3890,7 +4137,7 @@ section[data-testid="stSidebar"] [data-testid="stAlert"] * {
 
 
 
-/* V18.2 full contrast safety pass */
+/* V18.3 full contrast safety pass */
 
 /* MAIN WORKSPACE */
 [data-testid="stAppViewContainer"] label,
@@ -3978,7 +4225,7 @@ button[aria-label="Help"] svg {
     stroke:#52677B !important;
 }
 
-/* V18.2: Streamlit renders help icons differently by widget type.
+/* V18.3: Streamlit renders help icons differently by widget type.
    Force every widget-label help trigger to use the same clean question-mark treatment. */
 [data-testid="stWidgetLabel"] button,
 [data-testid="stWidgetLabel"] [role="button"],
@@ -4166,7 +4413,7 @@ section[data-testid="stSidebar"] [data-testid="stAlert"] * {
     color:#FFFFFF !important;
 }
 
-/* V18.2 — FINAL HELP ICON FIX
+/* V18.3 — FINAL HELP ICON FIX
    TextInput/NumberInput have broad button rules above for password/stepper controls.
    Streamlit places label help triggers inside those widget containers too, so those rules
    were repainting the help SVG as a solid dot. Keep this override LAST so help icons
@@ -4263,7 +4510,7 @@ button[data-baseweb="tab"]:not([aria-selected="true"]) p {
 
 
 
-/* V18.2 guest-first authentication */
+/* V18.3 guest-first authentication */
 .guest-card{
     background:rgba(255,255,255,.06);
     border:1px solid rgba(255,255,255,.10);
@@ -4489,12 +4736,30 @@ with main_sections[7]:
                         st.write(f"**{spec['ai_credits']:,}** AI credits / month")
                         st.write(f"**{spec['seat_limit']}** team seat{'s' if spec['seat_limit']!=1 else ''}")
                         st.caption("Normal accounting actions do not use AI credits.")
-                        st.button(
-                            "Stripe checkout coming next",
-                            disabled=True,
-                            use_container_width=True,
-                            key=f"v18_plan_{name.lower()}"
-                        )
+                        if stripe_checkout_ready(name):
+                            if st.button(
+                                f"Choose {name}",
+                                type="primary",
+                                use_container_width=True,
+                                key=f"v183_plan_{name.lower()}"
+                            ):
+                                try:
+                                    checkout_url=v183_create_checkout_session(cid,name)
+                                    st.link_button(
+                                        "Continue to secure Stripe checkout →",
+                                        checkout_url,
+                                        use_container_width=True
+                                    )
+                                    st.info("Stripe Checkout is ready. Click the button above to continue.")
+                                except Exception as e:
+                                    st.error(str(e))
+                        else:
+                            st.button(
+                                "Stripe setup incomplete",
+                                disabled=True,
+                                use_container_width=True,
+                                key=f"v183_missing_{name.lower()}"
+                            )
 
                 f1,f2=st.columns(2)
 
@@ -4507,12 +4772,30 @@ with main_sections[7]:
                     st.write("**Up to 50 people**")
                     st.write("Designed for future multi-client workspace management.")
                     st.caption("Normal accounting actions do not use AI credits.")
-                    st.button(
-                        "Stripe checkout coming next",
-                        disabled=True,
-                        use_container_width=True,
-                        key="v18_plan_accounting_firm"
-                    )
+                    if stripe_checkout_ready("Accounting Firm"):
+                        if st.button(
+                            "Choose Accounting Firm",
+                            type="primary",
+                            use_container_width=True,
+                            key="v183_plan_accounting_firm"
+                        ):
+                            try:
+                                checkout_url=v183_create_checkout_session(cid,"Accounting Firm")
+                                st.link_button(
+                                    "Continue to secure Stripe checkout →",
+                                    checkout_url,
+                                    use_container_width=True
+                                )
+                                st.info("Stripe Checkout is ready. Click the button above to continue.")
+                            except Exception as e:
+                                st.error(str(e))
+                    else:
+                        st.button(
+                            "Stripe setup incomplete",
+                            disabled=True,
+                            use_container_width=True,
+                            key="v183_missing_accounting_firm"
+                        )
 
                 with f2:
                     st.markdown("### Enterprise")
@@ -4566,7 +4849,7 @@ with main_sections[7]:
                     )
 
                 st.info(
-                    "V18.2 still does not activate paid plans. Stripe billing is the next connection step, "
+                    "V18.3 still does not activate paid plans. Stripe billing is the next connection step, "
                     "so no disabled plan button can accidentally grant paid access."
                 )
 
@@ -4586,7 +4869,7 @@ with main_sections[8]:
         "Accounting Periods","Smart Close","Integrity Center","Audit Trail","Accountant Export"
     ])
 
-# V18.2 navigation / action clarity
+# V18.3 navigation / action clarity
 if st.session_state.get("v13_destination"):
     st.success("You are looking for: **" + st.session_state["v13_destination"] + "**")
     if st.button("Clear destination"):
@@ -4727,7 +5010,7 @@ with home_tabs[0]:
             st.markdown('<div class="panel-v15">'+rows+'</div>',unsafe_allow_html=True)
 
     st.markdown(
-        '<footer class="footer-v15"><span>🛡 Your data is protected &nbsp; • &nbsp; Accounting controls are active &nbsp; • &nbsp; Advanced tools stay available</span><b>◆ Sullivan <small>V18.2</small></b></footer>',
+        '<footer class="footer-v15"><span>🛡 Your data is protected &nbsp; • &nbsp; Accounting controls are active &nbsp; • &nbsp; Advanced tools stay available</span><b>◆ Sullivan <small>V18.3</small></b></footer>',
         unsafe_allow_html=True
     )
 
@@ -6351,4 +6634,4 @@ with accountant_tabs[12]:
         with open(path,"rb") as f:st.download_button("Download package",f.read(),"sullivan_v15_4_accountant_package.zip","application/zip")
 
 st.divider()
-st.caption("Sullivan V18.2 globally enforces closed accounting periods while retaining V12.3 automatic document numbering.")
+st.caption("Sullivan V18.3 globally enforces closed accounting periods while retaining V12.3 automatic document numbering.")
