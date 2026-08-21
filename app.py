@@ -11,7 +11,7 @@ import stripe
 import requests
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V19.4.4", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V19.4.5", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -4115,7 +4115,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.4.4</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.4.5</span></div>",unsafe_allow_html=True)
 
 
 
@@ -6864,138 +6864,173 @@ with home_tabs[0]:
                 )
             )
 
-            # V19.4.4: cleaner cash-outlook visualization.
-            # Cash balance is the visual focus; inflow/outflow remain visible but quieter.
-            cash_only = melted[melted["Series"] == "Cash balance"]
+            # V19.4.5: relaxed, stock-chart-style cash outlook.
+            # One primary balance line, soft area fill, subtle cash-movement markers,
+            # tight 30-day date range, and a focused y-axis around the actual balance.
+            cash_only = melted[melted["Series"] == "Cash balance"].copy()
+            cash_only = cash_only.sort_values("date")
 
-            cash_area = alt.Chart(cash_only).mark_area(
-                interpolate="monotone",
-                opacity=0.12,
-                line=False
-            ).encode(
+            balance_min = float(cash_only["Amount"].min()) if not cash_only.empty else 0.0
+            balance_max = float(cash_only["Amount"].max()) if not cash_only.empty else 0.0
+            balance_span = max(balance_max - balance_min, abs(balance_max) * 0.04, 100.0)
+            y_pad = max(balance_span * 0.30, 100.0)
+            y_min = balance_min - y_pad
+            y_max = balance_max + y_pad
+
+            date_min = cash_only["date"].min() if not cash_only.empty else forecast["date"].min()
+            date_max = cash_only["date"].max() if not cash_only.empty else forecast["date"].max()
+
+            stock_base = alt.Chart(cash_only).encode(
                 x=alt.X(
                     "date:T",
                     title=None,
+                    scale=alt.Scale(domain=[date_min, date_max]),
                     axis=alt.Axis(
                         format="%b %d",
                         labelColor=axis_text,
                         labelAngle=0,
+                        labelPadding=12,
+                        tickCount=6,
                         tickColor=grid_color,
-                        domainColor=grid_color,
-                        grid=False,
-                        labelPadding=10
+                        domain=False,
+                        grid=False
                     )
                 ),
                 y=alt.Y(
                     "Amount:Q",
                     title=None,
+                    scale=alt.Scale(domain=[y_min, y_max], zero=False),
                     axis=alt.Axis(
                         format="$,.0f",
                         labelColor=axis_text,
+                        labelPadding=10,
+                        tickCount=5,
                         tickColor=grid_color,
-                        domainColor=grid_color,
+                        domain=False,
+                        grid=True,
                         gridColor=grid_color,
-                        gridOpacity=0.38,
-                        labelPadding=10
+                        gridOpacity=0.22
                     )
-                ),
-                color=alt.value("#4B9BFF")
+                )
             )
 
-            cash_line = alt.Chart(cash_only).mark_line(
+            cash_area = stock_base.mark_area(
                 interpolate="monotone",
-                strokeWidth=3.4,
-                color="#4B9BFF"
+                color="#4B9BFF",
+                opacity=0.10
+            )
+
+            cash_line = stock_base.mark_line(
+                interpolate="monotone",
+                color="#4B9BFF",
+                strokeWidth=3.0,
+                strokeCap="round",
+                strokeJoin="round"
             ).encode(
-                x="date:T",
-                y="Amount:Q",
                 tooltip=[
                     alt.Tooltip("date:T", title="Date", format="%b %d, %Y"),
-                    alt.Tooltip("Amount:Q", title="Projected bank balance", format="$,.2f"),
+                    alt.Tooltip("Amount:Q", title="Projected balance", format="$,.2f"),
                 ]
             )
 
-            movement_lines = alt.Chart(
-                melted[melted["Series"].isin(["Money in", "Money out"])]
-            ).mark_line(
-                interpolate="monotone",
-                strokeWidth=2.1,
-                opacity=0.82
+            # Subtle markers for days where money is expected to move.
+            inflow_days = forecast[forecast["Money in"] > 0].copy()
+            outflow_days = forecast[forecast["Money out"] > 0].copy()
+
+            inflow_marks = alt.Chart(inflow_days).mark_circle(
+                size=52,
+                color="#34C978",
+                opacity=0.90,
+                stroke=chart_bg,
+                strokeWidth=1.5
             ).encode(
-                x="date:T",
-                y="Amount:Q",
-                color=alt.Color(
-                    "Series:N",
-                    scale=alt.Scale(
-                        domain=["Money in", "Money out"],
-                        range=["#34C978", "#FF6673"]
-                    ),
-                    legend=alt.Legend(
-                        orient="top",
-                        direction="horizontal",
-                        title=None,
-                        labelColor=legend_text,
-                        labelFontSize=12,
-                        symbolStrokeWidth=3,
-                        padding=4
-                    )
+                x=alt.X("date:T", scale=alt.Scale(domain=[date_min, date_max])),
+                y=alt.Y(
+                    "Cash balance:Q",
+                    scale=alt.Scale(domain=[y_min, y_max], zero=False)
                 ),
                 tooltip=[
                     alt.Tooltip("date:T", title="Date", format="%b %d, %Y"),
-                    alt.Tooltip("Series:N", title="Movement"),
-                    alt.Tooltip("Amount:Q", title="Amount", format="$,.2f"),
+                    alt.Tooltip("Money in:Q", title="Money expected in", format="$,.2f"),
+                    alt.Tooltip("Cash balance:Q", title="Projected balance", format="$,.2f"),
                 ]
             )
 
-            hover_points = base.mark_circle(
-                size=88,
-                filled=True,
-                stroke="#FFFFFF",
-                strokeWidth=1.3
+            outflow_marks = alt.Chart(outflow_days).mark_circle(
+                size=52,
+                color="#FF6673",
+                opacity=0.90,
+                stroke=chart_bg,
+                strokeWidth=1.5
             ).encode(
-                opacity=alt.condition(nearest, alt.value(1), alt.value(0))
+                x=alt.X("date:T", scale=alt.Scale(domain=[date_min, date_max])),
+                y=alt.Y(
+                    "Cash balance:Q",
+                    scale=alt.Scale(domain=[y_min, y_max], zero=False)
+                ),
+                tooltip=[
+                    alt.Tooltip("date:T", title="Date", format="%b %d, %Y"),
+                    alt.Tooltip("Money out:Q", title="Bills expected out", format="$,.2f"),
+                    alt.Tooltip("Cash balance:Q", title="Projected balance", format="$,.2f"),
+                ]
             )
 
-            selectors = alt.Chart(melted).mark_point(opacity=0).encode(
+            nearest_cash = alt.selection_point(
+                nearest=True,
+                on="pointerover",
+                fields=["date"],
+                empty=False
+            )
+
+            selector = alt.Chart(cash_only).mark_point(
+                opacity=0
+            ).encode(
                 x="date:T"
-            ).add_params(nearest)
+            ).add_params(nearest_cash)
 
-            rule = alt.Chart(melted).mark_rule(
-                strokeDash=[3,5],
-                strokeWidth=1,
+            hover_rule = alt.Chart(cash_only).mark_rule(
                 color="#8CA0B4",
-                opacity=0.7
+                opacity=0.45,
+                strokeWidth=1
             ).encode(
                 x="date:T"
-            ).transform_filter(nearest)
+            ).transform_filter(nearest_cash)
+
+            hover_dot = stock_base.mark_circle(
+                size=78,
+                color="#4B9BFF",
+                stroke="#FFFFFF",
+                strokeWidth=1.6
+            ).encode(
+                opacity=alt.condition(nearest_cash, alt.value(1), alt.value(0)),
+                tooltip=[
+                    alt.Tooltip("date:T", title="Date", format="%b %d, %Y"),
+                    alt.Tooltip("Amount:Q", title="Projected balance", format="$,.2f"),
+                ]
+            )
 
             chart = (
                 cash_area
                 + cash_line
-                + movement_lines
-                + hover_points
-                + selectors
-                + rule
+                + inflow_marks
+                + outflow_marks
+                + selector
+                + hover_rule
+                + hover_dot
             ).properties(
-                height=325,
+                height=300,
                 background=chart_bg,
-                padding={"left": 8, "right": 12, "top": 8, "bottom": 4}
+                padding={"left": 4, "right": 10, "top": 12, "bottom": 4}
             ).configure_view(
-                stroke=grid_color,
-                strokeWidth=1,
-                cornerRadius=10
+                stroke=None
             ).configure_axis(
-                titleColor=axis_text,
                 labelFontSize=11
-            ).configure_legend(
-                orient="top",
-                labelColor=legend_text
             )
 
             st.altair_chart(chart, width="stretch")
             st.caption(
-                "Blue = projected bank balance • Green = money expected in • Red = bills expected out. "
-                "Hover anywhere on the graph for exact values."
+                "Projected bank balance for the next 30 days. "
+                "Green dots = expected money in • Red dots = expected bills out • Hover for exact values."
             )
         except Exception:
             st.line_chart(forecast.set_index("date")[["Cash balance"]],height=285)
