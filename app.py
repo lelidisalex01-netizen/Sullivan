@@ -13,7 +13,7 @@ import stripe
 import requests
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V20.3.1", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V20.4.1", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -218,6 +218,9 @@ WORKSPACE_ACCOUNTING_TABLES = (
     "financing_payments",
     "business_assets",
     "equity_transactions",
+    "income_sources",
+    "employees",
+    "payroll_runs",
 )
 
 SHARED_SULLIVAN_TABLES = (
@@ -525,6 +528,46 @@ def init_db():
         owner_name TEXT,
         amount REAL NOT NULL DEFAULT 0,
         memo TEXT,
+        created_at TEXT NOT NULL
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS income_sources(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_name TEXT NOT NULL,
+        income_type TEXT NOT NULL DEFAULT 'Employment',
+        gross_amount REAL NOT NULL DEFAULT 0,
+        frequency TEXT NOT NULL DEFAULT 'Monthly',
+        tax_withheld REAL NOT NULL DEFAULT 0,
+        other_deductions REAL NOT NULL DEFAULT 0,
+        active INTEGER DEFAULT 1,
+        notes TEXT,
+        created_at TEXT NOT NULL
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS employees(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        employee_name TEXT NOT NULL,
+        pay_type TEXT NOT NULL DEFAULT 'Salary',
+        annual_salary REAL NOT NULL DEFAULT 0,
+        hourly_rate REAL NOT NULL DEFAULT 0,
+        hours_per_week REAL NOT NULL DEFAULT 40,
+        filing_status TEXT NOT NULL DEFAULT 'Single',
+        extra_withholding REAL NOT NULL DEFAULT 0,
+        active INTEGER DEFAULT 1,
+        notes TEXT,
+        created_at TEXT NOT NULL
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS payroll_runs(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        employee_id INTEGER NOT NULL,
+        pay_date TEXT NOT NULL,
+        gross_pay REAL NOT NULL DEFAULT 0,
+        federal_tax REAL NOT NULL DEFAULT 0,
+        state_tax REAL NOT NULL DEFAULT 0,
+        social_security REAL NOT NULL DEFAULT 0,
+        medicare REAL NOT NULL DEFAULT 0,
+        other_deductions REAL NOT NULL DEFAULT 0,
+        net_pay REAL NOT NULL DEFAULT 0,
+        employer_payroll_tax REAL NOT NULL DEFAULT 0,
+        region_label TEXT,
         created_at TEXT NOT NULL
         )""")
 
@@ -4187,7 +4230,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V20.3.1</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V20.4.1</span></div>",unsafe_allow_html=True)
 
 
 
@@ -7204,6 +7247,264 @@ def v202_render_financial_position(snapshot, is_dark):
 # ============================================================
 # V20.3 — PERSONALIZED SULLIVAN BUSINESS ADVISOR
 # ============================================================
+
+# ============================================================
+# V20.4 — REGION, INCOME & PAYROLL
+# ============================================================
+V204_US_STATES = [
+    "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut","Delaware",
+    "District of Columbia","Florida","Georgia","Hawaii","Idaho","Illinois","Indiana","Iowa",
+    "Kansas","Kentucky","Louisiana","Maine","Maryland","Massachusetts","Michigan","Minnesota",
+    "Mississippi","Missouri","Montana","Nebraska","Nevada","New Hampshire","New Jersey",
+    "New Mexico","New York","North Carolina","North Dakota","Ohio","Oklahoma","Oregon",
+    "Pennsylvania","Rhode Island","South Carolina","South Dakota","Tennessee","Texas","Utah",
+    "Vermont","Virginia","Washington","West Virginia","Wisconsin","Wyoming"
+]
+V204_CANADA_REGIONS = [
+    "Alberta","British Columbia","Manitoba","New Brunswick","Newfoundland and Labrador",
+    "Northwest Territories","Nova Scotia","Nunavut","Ontario","Prince Edward Island",
+    "Quebec","Saskatchewan","Yukon"
+]
+
+def v204_region():
+    p = profile()
+    country = str(p.get("country") or "United States")
+    region = str(p.get("region") or ("Virginia" if country == "United States" else "Quebec"))
+    return country, region
+
+def v204_save_region(country, region):
+    def _save(c):
+        c.execute("INSERT OR IGNORE INTO business_profile(id,business_name,country,region) VALUES(1,'',?,?)",
+                  (country,region))
+        c.execute("UPDATE business_profile SET country=?,region=? WHERE id=1",(country,region))
+    write(_save)
+
+def v204_annualize(amount, frequency):
+    mult={"Weekly":52,"Biweekly":26,"Semimonthly":24,"Monthly":12,"Annual":1}
+    return float(amount or 0)*mult.get(str(frequency),12)
+
+def v204_progressive_tax(taxable, brackets):
+    taxable=max(0.0,float(taxable or 0))
+    tax=0.0
+    lower=0.0
+    for upper,rate in brackets:
+        band=min(taxable,upper)-lower
+        if band>0: tax += band*rate
+        if taxable<=upper: return tax
+        lower=upper
+    return tax
+
+def v204_us_federal_income_tax_2026(gross, filing_status="Single"):
+    gross=max(0.0,float(gross or 0))
+    status=str(filing_status or "Single")
+    if status=="Married filing jointly":
+        deduction=32200.0
+        brackets=[(24800,.10),(100800,.12),(211400,.22),(403550,.24),(512450,.32),(768700,.35),(10**12,.37)]
+    elif status=="Head of household":
+        deduction=24150.0
+        brackets=[(17700,.10),(67450,.12),(105700,.22),(201750,.24),(256200,.32),(640600,.35),(10**12,.37)]
+    else:
+        deduction=16100.0
+        brackets=[(12400,.10),(50400,.12),(105700,.22),(201775,.24),(256225,.32),(640600,.35),(10**12,.37)]
+    taxable=max(0.0,gross-deduction)
+    return v204_progressive_tax(taxable,brackets)
+
+def v204_virginia_income_tax(gross):
+    # Planning estimate using Virginia's published individual rate schedule.
+    taxable=max(0.0,float(gross or 0)-3000.0)
+    return v204_progressive_tax(taxable,[(3000,.02),(5000,.03),(17000,.05),(10**12,.0575)])
+
+def v204_tax_estimate(annual_gross, country, region, filing_status="Single"):
+    gross=max(0.0,float(annual_gross or 0))
+    result={"federal":0.0,"regional":0.0,"social":0.0,"medicare":0.0,
+            "supported":False,"note":"","employer_payroll":0.0}
+    if country=="United States":
+        result["federal"]=v204_us_federal_income_tax_2026(gross,filing_status)
+        result["social"]=min(gross,184500.0)*.062
+        result["medicare"]=gross*.0145 + max(0.0,gross-200000.0)*.009
+        result["employer_payroll"]=min(gross,184500.0)*.062 + gross*.0145
+        if region=="Virginia":
+            result["regional"]=v204_virginia_income_tax(gross)
+            result["supported"]=True
+            result["note"]="2026 U.S. federal + Virginia planning estimate."
+        else:
+            result["note"]=f"2026 U.S. federal payroll taxes are modeled. {region} income tax is not yet fully modeled, so Sullivan does not invent a state-tax amount."
+    else:
+        result["note"]=f"{country} · {region} is saved as this workspace's tax region. Detailed payroll tax calculation for this region is not yet enabled in V20.4."
+    result["total_employee_tax"]=result["federal"]+result["regional"]+result["social"]+result["medicare"]
+    result["estimated_net"]=max(0.0,gross-result["total_employee_tax"])
+    return result
+
+def v204_income_summary():
+    df=read("SELECT * FROM income_sources WHERE active=1 ORDER BY id DESC")
+    annual_gross=annual_withheld=annual_other=0.0
+    if not df.empty:
+        for _,r in df.iterrows():
+            freq=str(r.get("frequency") or "Monthly")
+            annual_gross += v204_annualize(r.get("gross_amount",0),freq)
+            annual_withheld += v204_annualize(r.get("tax_withheld",0),freq)
+            annual_other += v204_annualize(r.get("other_deductions",0),freq)
+    return df,annual_gross,annual_withheld,annual_other
+
+def v204_render_income_payroll():
+    country,region=v204_region()
+    is_company=current_company() is not None
+    mode="Business payroll" if is_company else "Personal income"
+
+    st.subheader("Income & Payroll")
+    st.caption(f"{mode} · Tax region: {region}, {country}")
+
+    if not v171_is_signed_in():
+        st.info("Sign in to manage income and payroll.")
+        return
+
+    sources,annual_gross,annual_withheld,annual_other=v204_income_summary()
+    personal_tax=v204_tax_estimate(annual_gross,country,region,"Single")
+    estimated_net=max(0.0,annual_gross-personal_tax["total_employee_tax"]-annual_other)
+
+    # Gross vs net explainer
+    a,b,c,d=st.columns(4)
+    a.metric("Annual gross income",f"${annual_gross:,.2f}")
+    b.metric("Estimated net income",f"${estimated_net:,.2f}")
+    c.metric("Taxes / payroll taxes",f"${personal_tax['total_employee_tax']:,.2f}")
+    d.metric("Other deductions",f"${annual_other:,.2f}")
+
+    st.info(
+        "**Gross vs. net:** Gross income is what is earned before taxes and deductions. "
+        "Net income is what remains after estimated income tax, payroll taxes, and other deductions. "
+        "The difference changes with your tax region, filing situation, and deductions."
+    )
+
+    tabs = st.tabs(["Income","Gross vs Net","Payroll"] if is_company else ["Income","Gross vs Net"])
+
+    with tabs[0]:
+        left,right=st.columns([1.2,1])
+        with left:
+            st.markdown("### Income sources")
+            if sources.empty:
+                st.info("No income sources recorded yet.")
+            else:
+                show=sources.copy()
+                show["Annual gross"]=show.apply(lambda r:v204_annualize(r["gross_amount"],r["frequency"]),axis=1)
+                show["Annual deductions"]=show.apply(
+                    lambda r:v204_annualize(float(r["tax_withheld"] or 0)+float(r["other_deductions"] or 0),r["frequency"]),axis=1)
+                st.dataframe(show[["source_name","income_type","frequency","gross_amount","Annual gross","Annual deductions"]],
+                             width="stretch",hide_index=True)
+        with right:
+            st.markdown("### Add income")
+            with st.form("v204_add_income"):
+                nm=st.text_input("Income source",placeholder="Employer, salary, side business, pension…")
+                it=st.selectbox("Income type",["Employment","Self-employment","Business distribution","Pension","Investment income","Rental income","Other"])
+                fr=st.selectbox("Frequency",["Weekly","Biweekly","Semimonthly","Monthly","Annual"])
+                ga=st.number_input("Gross amount per period",min_value=0.0,step=100.0,format="%.2f")
+                tw=st.number_input("Tax already withheld per period",min_value=0.0,step=10.0,format="%.2f")
+                od=st.number_input("Other deductions per period",min_value=0.0,step=10.0,format="%.2f")
+                notes=st.text_input("Notes",placeholder="Optional")
+                if st.form_submit_button("Add income source",type="primary"):
+                    if not nm.strip() or ga<=0:
+                        st.error("Enter an income source and gross amount.")
+                    else:
+                        now=datetime.now().isoformat(timespec="seconds")
+                        write(lambda c:c.execute("""INSERT INTO income_sources(
+                            source_name,income_type,gross_amount,frequency,tax_withheld,other_deductions,active,notes,created_at)
+                            VALUES(?,?,?,?,?,?,?,?,?)""",(nm.strip(),it,ga,fr,tw,od,1,notes.strip(),now)))
+                        st.success("Income source added.")
+                        st.rerun()
+
+    with tabs[1]:
+        st.markdown("### Where gross income goes")
+        tax=personal_tax
+        net=max(0.0,annual_gross-tax["total_employee_tax"]-annual_other)
+        comp=pd.DataFrame({
+            "Part":["Federal income tax","Regional income tax","Social Security","Medicare","Other deductions","Estimated net"],
+            "Amount":[tax["federal"],tax["regional"],tax["social"],tax["medicare"],annual_other,net]
+        })
+        st.bar_chart(comp.set_index("Part"),height=330,width="stretch")
+        if annual_gross>0:
+            effective=(tax["total_employee_tax"]/annual_gross)*100
+            st.write(f"**Estimated tax/payroll-tax share:** {effective:.1f}% of gross income.")
+            st.write(f"**Estimated take-home share:** {(net/annual_gross)*100:.1f}% of gross income.")
+        st.caption(tax["note"])
+        if country=="United States" and region=="Virginia":
+            st.success("Virginia tax profile is active. Sullivan is using the 2026 U.S. federal rules and Virginia individual rate schedule for planning estimates.")
+        elif not tax["supported"]:
+            st.warning("This region is saved correctly, but its full local income-tax engine is not enabled yet. Sullivan is intentionally not guessing the missing regional tax.")
+
+    if is_company:
+        with tabs[2]:
+            st.markdown("### Employees & payroll")
+            employees=read("SELECT * FROM employees WHERE active=1 ORDER BY employee_name")
+            p1,p2=st.columns([1.15,1])
+            with p1:
+                if employees.empty:
+                    st.info("No employees recorded yet.")
+                else:
+                    st.dataframe(employees[["id","employee_name","pay_type","annual_salary","hourly_rate","hours_per_week","filing_status"]],
+                                 width="stretch",hide_index=True)
+            with p2:
+                with st.form("v204_add_employee"):
+                    en=st.text_input("Employee name")
+                    pt=st.selectbox("Pay type",["Salary","Hourly"])
+                    salary=st.number_input("Annual salary",min_value=0.0,step=1000.0,format="%.2f")
+                    hourly=st.number_input("Hourly rate",min_value=0.0,step=1.0,format="%.2f")
+                    hpw=st.number_input("Hours per week",min_value=0.0,max_value=100.0,value=40.0,step=1.0)
+                    fs=st.selectbox("Federal filing status",["Single","Married filing jointly","Head of household"])
+                    extra=st.number_input("Extra withholding per pay period",min_value=0.0,step=10.0)
+                    if st.form_submit_button("Add employee",type="primary"):
+                        if not en.strip():
+                            st.error("Enter an employee name.")
+                        else:
+                            now=datetime.now().isoformat(timespec="seconds")
+                            write(lambda c:c.execute("""INSERT INTO employees(
+                                employee_name,pay_type,annual_salary,hourly_rate,hours_per_week,filing_status,extra_withholding,active,created_at)
+                                VALUES(?,?,?,?,?,?,?,?,?)""",(en.strip(),pt,salary,hourly,hpw,fs,extra,1,now)))
+                            st.success("Employee added.")
+                            st.rerun()
+
+            if not employees.empty:
+                st.divider()
+                st.markdown("### Run payroll estimate")
+                names={f'#{int(r["id"])} · {r["employee_name"]}':int(r["id"]) for _,r in employees.iterrows()}
+                chosen=st.selectbox("Employee",list(names.keys()),key="v204_pay_emp")
+                emp=employees[employees["id"]==names[chosen]].iloc[0]
+                freq=st.selectbox("Pay frequency",["Weekly","Biweekly","Semimonthly","Monthly"],index=1,key="v204_pay_freq")
+                periods={"Weekly":52,"Biweekly":26,"Semimonthly":24,"Monthly":12}[freq]
+                annual=float(emp["annual_salary"] or 0) if emp["pay_type"]=="Salary" else float(emp["hourly_rate"] or 0)*float(emp["hours_per_week"] or 0)*52
+                gross=annual/periods if periods else 0
+                annual_tax=v204_tax_estimate(annual,country,region,str(emp["filing_status"]))
+                fed=annual_tax["federal"]/periods
+                state=annual_tax["regional"]/periods
+                ss=annual_tax["social"]/periods
+                med=annual_tax["medicare"]/periods
+                extra=float(emp["extra_withholding"] or 0)
+                net=max(0.0,gross-fed-state-ss-med-extra)
+                employer_tax=annual_tax["employer_payroll"]/periods
+
+                r1,r2,r3,r4=st.columns(4)
+                r1.metric("Gross pay",f"${gross:,.2f}")
+                r2.metric("Estimated employee taxes",f"${fed+state+ss+med:,.2f}")
+                r3.metric("Estimated net pay",f"${net:,.2f}")
+                r4.metric("Employer payroll tax",f"${employer_tax:,.2f}")
+                st.caption(annual_tax["note"])
+
+                if st.button("Record payroll run",type="primary",key="v204_record_pay"):
+                    now=datetime.now().isoformat(timespec="seconds")
+                    write(lambda c:c.execute("""INSERT INTO payroll_runs(
+                        employee_id,pay_date,gross_pay,federal_tax,state_tax,social_security,medicare,
+                        other_deductions,net_pay,employer_payroll_tax,region_label,created_at)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (int(emp["id"]),date.today().isoformat(),gross,fed,state,ss,med,extra,net,employer_tax,f"{region}, {country}",now)))
+                    st.success("Payroll run recorded.")
+                    st.rerun()
+
+            runs=read("""SELECT p.*,e.employee_name FROM payroll_runs p
+                         LEFT JOIN employees e ON e.id=p.employee_id ORDER BY p.pay_date DESC,p.id DESC""")
+            if not runs.empty:
+                st.markdown("### Payroll history")
+                st.dataframe(runs[["pay_date","employee_name","gross_pay","federal_tax","state_tax","social_security",
+                                   "medicare","other_deductions","net_pay","employer_payroll_tax","region_label"]],
+                             width="stretch",hide_index=True)
+
 def v203_advisor_focus_areas(snapshot):
     areas = []
     if snapshot["ar_overdue"] > 0:
@@ -8456,32 +8757,35 @@ with st.sidebar:
         "Support questions do not use your normal AI points."
     )
 
-main_sections=st.tabs(["Home","Advanced","Money In","Money Out","Bank","Taxes","Reports","Insights","Finance","Team","Plan & AI","Settings"])
+main_sections=st.tabs(["Home","Advanced","Income & Payroll","Money In","Money Out","Bank","Taxes","Reports","Insights","Finance","Team","Plan & AI","Settings"])
 
 
 with main_sections[0]:
     home_tabs=[st.container()]
 with main_sections[2]:
-    sales_tabs=st.tabs(["Customers","Estimates","Invoices","Credit Notes","Recurring","Statements"])
+    v204_render_income_payroll()
+
 with main_sections[3]:
-    expense_tabs=st.tabs(["Vendors","Purchase Orders","Bills","Documents"])
+    sales_tabs=st.tabs(["Customers","Estimates","Invoices","Credit Notes","Recurring","Statements"])
 with main_sections[4]:
-    banking_tabs=st.tabs(["Bank Activity","Reconciliation"])
+    expense_tabs=st.tabs(["Vendors","Purchase Orders","Bills","Documents"])
 with main_sections[5]:
-    tax_tabs=st.tabs(["Tax Center"])
+    banking_tabs=st.tabs(["Bank Activity","Reconciliation"])
 with main_sections[6]:
-    report_tabs=st.tabs(["Financial Reports","Money Owed / Bills Owed"])
+    tax_tabs=st.tabs(["Tax Center"])
 with main_sections[7]:
+    report_tabs=st.tabs(["Financial Reports","Money Owed / Bills Owed"])
+with main_sections[8]:
     v202_render_business_intelligence()
 
-with main_sections[8]:
+with main_sections[9]:
     finance_sections=st.tabs(["Debt & Financing","Assets & Equity"])
     with finance_sections[0]:
         v20_render_finance()
     with finance_sections[1]:
         v201_render_assets_equity()
 
-with main_sections[9]:
+with main_sections[10]:
     st.subheader("Team")
 
     if not v171_is_signed_in():
@@ -8542,7 +8846,7 @@ with main_sections[9]:
             else:
                 st.info("Only an Owner or Manager can invite employees.")
 
-with main_sections[10]:
+with main_sections[11]:
     st.subheader("Plan & AI")
     st.caption("Manage your Sullivan membership, team seats, billing status, and AI usage.")
 
@@ -8797,7 +9101,7 @@ with main_sections[1]:
         "Accounting Periods","Smart Close","Integrity Center","Audit Trail","Accountant Export"
     ])
 
-with main_sections[11]:
+with main_sections[12]:
     st.subheader("Settings")
     st.caption("Manage your Sullivan preferences, workspaces, account details, and support options.")
 
@@ -8835,6 +9139,34 @@ with main_sections[11]:
                     st.rerun()
                 except Exception as e:
                     st.error(str(e))
+
+            st.markdown("### Tax region")
+            st.caption(
+                "Sullivan uses the active workspace's country and state/province for payroll, income, tax estimates, and future tax-aware planning."
+            )
+            saved_country, saved_region = v204_region()
+            region_country = st.selectbox(
+                "Country",
+                ["United States","Canada"],
+                index=0 if saved_country=="United States" else 1,
+                key="v204_region_country"
+            )
+            region_choices = V204_US_STATES if region_country=="United States" else V204_CANADA_REGIONS
+            region_default = saved_region if saved_region in region_choices else region_choices[0]
+            region_name = st.selectbox(
+                "State / province / territory",
+                region_choices,
+                index=region_choices.index(region_default),
+                key="v204_region_name"
+            )
+            if st.button("Save tax region", type="primary", key="v204_save_region"):
+                v204_save_region(region_country, region_name)
+                st.success(f"Tax region saved: {region_name}, {region_country}.")
+                st.rerun()
+            st.caption(
+                "V20.4 includes a detailed 2026 U.S. federal + Virginia payroll/income-tax planning profile. "
+                "Other regions are stored now and Sullivan will not invent unsupported local tax amounts."
+            )
 
             st.markdown("### Workspace behavior")
             active_settings_company = current_company()
@@ -8998,6 +9330,14 @@ with home_tabs[0]:
             </div>
         </section>""",
         unsafe_allow_html=True
+    )
+
+    # V20.4.1 — Home tax-region reminder
+    home_country, home_region = v204_region()
+    st.info(
+        f"🌎 **Tax region: {home_region}, {home_country}**  ·  "
+        "Sullivan uses this for supported income, payroll, and tax estimates. "
+        "To change it, go to **Settings → Preferences → Tax Region**."
     )
 
     kpis=[
