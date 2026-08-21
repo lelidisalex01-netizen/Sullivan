@@ -11,10 +11,10 @@ import stripe
 import requests
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V18.3.2", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V19", page_icon="S", layout="wide")
 
 
-# Sullivan V18.3 visual system: calm navy + blue + mint + warm amber.
+# Sullivan V19 visual system: calm navy + blue + mint + warm amber.
 APP_DIR = Path(__file__).resolve().parent
 ENV_PATH = APP_DIR / ".env"
 DB_PATH = APP_DIR / "sullivan.db"
@@ -97,7 +97,7 @@ CATEGORY_TO_ACCOUNT = {
 
 CATEGORIES = list(CATEGORY_TO_ACCOUNT)
 
-# Sullivan V18 membership foundation.
+# Sullivan V19 membership foundation.
 # Stripe is intentionally NOT connected yet. These definitions control the
 # internal subscription/credit model that Stripe will activate later.
 SULLIVAN_PLANS = {
@@ -2901,6 +2901,11 @@ def join_company_with_invite(user_id,user_email,invite_code):
 
 
 def v18_company_billing(company_id):
+    """
+    V19 billing reader.
+    SQLite remains the local workspace store, but Supabase is authoritative
+    for Stripe-backed subscription state whenever a valid remote row exists.
+    """
     cid = int(company_id)
 
     d = read(
@@ -2915,51 +2920,47 @@ def v18_company_billing(company_id):
         return None
 
     result = d.iloc[0].to_dict()
+    remote = v19_supabase_subscription(cid)
 
-    # Supabase is authoritative for Stripe-backed billing state.
-    remote = v184_supabase_subscription(cid)
+    remote_ok = bool(
+        remote
+        and remote.get("_diagnostic") not in ("missing_secrets", "http_error", "no_row", "exception")
+        and remote.get("plan")
+    )
 
-    if remote:
-        result["subscription_plan"] = remote.get("plan") or result.get("subscription_plan") or "Trial"
-        result["subscription_status"] = (
-            remote.get("subscription_status")
-            or result.get("subscription_status")
-            or "Trial"
-        )
+    if remote_ok:
+        result["subscription_plan"] = str(remote.get("plan") or "Trial")
+        result["subscription_status"] = str(remote.get("subscription_status") or "Trial")
         result["ai_credit_limit"] = int(remote.get("ai_credits") or 0)
         result["seat_limit"] = max(1, int(remote.get("seat_limit") or 1))
-        result["stripe_customer_id"] = (
-            remote.get("stripe_customer_id")
-            or result.get("stripe_customer_id")
-            or ""
-        )
-        result["stripe_subscription_id"] = (
-            remote.get("stripe_subscription_id")
-            or result.get("stripe_subscription_id")
-            or ""
-        )
+        result["stripe_customer_id"] = str(remote.get("stripe_customer_id") or "")
+        result["stripe_subscription_id"] = str(remote.get("stripe_subscription_id") or "")
         result["cancel_at_period_end"] = bool(remote.get("cancel_at_period_end", False))
         result["current_period_end"] = remote.get("current_period_end")
 
+        # Keep legacy/local UI in sync with the authoritative shared billing row.
         try:
             write(lambda c: c.execute(
                 """UPDATE companies
-                   SET subscription_plan=?, subscription_status=?,
-                       ai_credit_limit=?, seat_limit=?,
-                       stripe_customer_id=?, stripe_subscription_id=?
+                   SET subscription_plan=?,
+                       subscription_status=?,
+                       ai_credit_limit=?,
+                       seat_limit=?,
+                       stripe_customer_id=?,
+                       stripe_subscription_id=?
                    WHERE id=?""",
                 (
-                    str(result["subscription_plan"]),
-                    str(result["subscription_status"]),
-                    int(result["ai_credit_limit"]),
-                    int(result["seat_limit"]),
-                    str(result["stripe_customer_id"] or ""),
-                    str(result["stripe_subscription_id"] or ""),
+                    result["subscription_plan"],
+                    result["subscription_status"],
+                    result["ai_credit_limit"],
+                    result["seat_limit"],
+                    result["stripe_customer_id"],
+                    result["stripe_subscription_id"],
                     cid,
                 )
             ))
         except Exception as e:
-            print(f"Local billing sync failed for company {cid}: {e}")
+            print(f"V19 local billing sync failed for company {cid}: {e}")
 
     return result
 
@@ -3186,7 +3187,7 @@ def v18_save_enterprise_quote(company_id,seats,expected_ai_usage,estimate,summar
 
 
 # ==========================
-# Sullivan V18.3 Stripe Sandbox
+# Sullivan V19 Stripe Sandbox
 # ==========================
 
 SULLIVAN_PUBLIC_URL = "https://sullivan-accounting.streamlit.app"
@@ -3226,7 +3227,7 @@ def supabase_headers():
     }
 
 
-def v184_supabase_subscription(company_id):
+def v19_supabase_subscription(company_id):
     """Read the authoritative Sullivan billing record from Supabase."""
     if not supabase_ready():
         missing = []
@@ -3259,6 +3260,21 @@ def v184_supabase_subscription(company_id):
     except Exception as e:
         print(f"Supabase subscription lookup error for company {cid}: {e}")
         return None
+
+
+def v19_billing_diagnostic(company_id):
+    """Return safe billing diagnostics without exposing secrets."""
+    remote = v19_supabase_subscription(company_id)
+    return {
+        "company_id": int(company_id),
+        "supabase_configured": supabase_ready(),
+        "state": remote.get("_diagnostic", "connected") if remote else "unknown",
+        "message": remote.get("_message", "") if remote else "",
+        "remote_plan": remote.get("plan") if remote and not remote.get("_diagnostic") in ("missing_secrets","http_error","no_row","exception") else None,
+        "remote_status": remote.get("subscription_status") if remote and not remote.get("_diagnostic") in ("missing_secrets","http_error","no_row","exception") else None,
+        "remote_ai_credits": remote.get("ai_credits") if remote and not remote.get("_diagnostic") in ("missing_secrets","http_error","no_row","exception") else None,
+        "remote_seat_limit": remote.get("seat_limit") if remote and not remote.get("_diagnostic") in ("missing_secrets","http_error","no_row","exception") else None,
+    }
 
 def stripe_secret_key():
     return _secret_value("STRIPE_SECRET_KEY")
@@ -3463,12 +3479,12 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V18.3.2</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19</span></div>",unsafe_allow_html=True)
 
 
 
 # ==========================
-# V18.3 guest-first access
+# V19 guest-first access
 # ==========================
 if "auth_user" not in st.session_state:
     st.session_state["auth_user"] = None
@@ -3549,7 +3565,7 @@ st.file_uploader = _v171_file_uploader
 
 p0=profile()
 
-# V18.3: Handle Stripe Checkout redirect safely.
+# V19: Handle Stripe Checkout redirect safely.
 try:
     checkout_state = st.query_params.get("checkout", "")
 except Exception:
@@ -4789,6 +4805,27 @@ with main_sections[7]:
                 b3.metric("AI credits used",f'{status["used"]:,} / {status["limit"]:,}')
                 b4.metric("Team seats",f'{seats_used} / {status["seat_limit"]}')
 
+
+                # V19 safe billing diagnostic: never exposes secrets.
+                billing_diag = v19_billing_diagnostic(cid)
+                st.markdown("### Billing sync")
+                if billing_diag["state"] == "connected":
+                    st.success(
+                        f'✅ Supabase connected — '
+                        f'{billing_diag["remote_plan"]} / {billing_diag["remote_status"]}'
+                    )
+                    st.caption(
+                        f'Company {billing_diag["company_id"]} • '
+                        f'{int(billing_diag["remote_ai_credits"] or 0):,} AI credits • '
+                        f'{int(billing_diag["remote_seat_limit"] or 1)} seats'
+                    )
+                else:
+                    st.error("❌ Supabase billing sync is not connected.")
+                    st.caption(
+                        f'Company {billing_diag["company_id"]} • '
+                        f'{billing_diag["message"] or billing_diag["state"]}'
+                    )
+
                 if status["plan"]=="Trial":
                     st.markdown("### Try Sullivan AI once — free")
                     saved_demo=v18_demo_result(cid)
@@ -4851,7 +4888,7 @@ with main_sections[7]:
                         st.caption("Normal accounting actions do not use AI credits.")
                         if stripe_checkout_ready(name):
                             if st.button(
-                                f"Choose {name}",
+                                ("Current plan ✓" if status["plan"] == name and status["status"] == "Active" else f"Choose {name}"),
                                 type="primary",
                                 use_container_width=True,
                                 key=f"v183_plan_{name.lower()}"
@@ -4887,7 +4924,7 @@ with main_sections[7]:
                     st.caption("Normal accounting actions do not use AI credits.")
                     if stripe_checkout_ready("Accounting Firm"):
                         if st.button(
-                            "Choose Accounting Firm",
+                            ("Current plan ✓" if status["plan"] == "Accounting Firm" and status["status"] == "Active" else "Choose Accounting Firm"),
                             type="primary",
                             use_container_width=True,
                             key="v183_plan_accounting_firm"
@@ -6747,4 +6784,4 @@ with accountant_tabs[12]:
         with open(path,"rb") as f:st.download_button("Download package",f.read(),"sullivan_v15_4_accountant_package.zip","application/zip")
 
 st.divider()
-st.caption("Sullivan V18.3 globally enforces closed accounting periods while retaining V12.3 automatic document numbering.")
+st.caption("Sullivan V19 globally enforces closed accounting periods while retaining V12.3 automatic document numbering.")
