@@ -13,7 +13,7 @@ import stripe
 import requests
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V19.6", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V20", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -213,6 +213,8 @@ WORKSPACE_ACCOUNTING_TABLES = (
     "purchase_order_lines",
     "recurring_invoices",
     "accounting_periods",
+    "financing_accounts",
+    "financing_payments",
 )
 
 SHARED_SULLIVAN_TABLES = (
@@ -457,6 +459,44 @@ def init_db():
         c.execute("""CREATE TABLE IF NOT EXISTS accounting_periods(
         id INTEGER PRIMARY KEY AUTOINCREMENT,period_start TEXT,period_end TEXT,status TEXT DEFAULT 'Open',
         closed_at TEXT,UNIQUE(period_start,period_end))""")
+        c.execute("""CREATE TABLE IF NOT EXISTS financing_accounts(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        financing_type TEXT NOT NULL DEFAULT 'Term Loan',
+        lender TEXT,
+        original_principal REAL NOT NULL DEFAULT 0,
+        current_balance REAL NOT NULL DEFAULT 0,
+        annual_interest_rate REAL NOT NULL DEFAULT 0,
+        rate_type TEXT DEFAULT 'Fixed',
+        term_months INTEGER DEFAULT 0,
+        payment_frequency TEXT DEFAULT 'Monthly',
+        scheduled_payment REAL DEFAULT 0,
+        start_date TEXT,
+        maturity_date TEXT,
+        next_payment_date TEXT,
+        credit_limit REAL DEFAULT 0,
+        collateral TEXT,
+        notes TEXT,
+        liability_account TEXT DEFAULT '2200 Loan Payable',
+        interest_account TEXT DEFAULT '6500 Interest Expense',
+        cash_account TEXT DEFAULT '1000 Bank',
+        status TEXT DEFAULT 'Active',
+        created_at TEXT NOT NULL
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS financing_payments(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        financing_id INTEGER NOT NULL,
+        payment_date TEXT NOT NULL,
+        payment_amount REAL NOT NULL DEFAULT 0,
+        principal_amount REAL NOT NULL DEFAULT 0,
+        interest_amount REAL NOT NULL DEFAULT 0,
+        fee_amount REAL NOT NULL DEFAULT 0,
+        balance_after REAL NOT NULL DEFAULT 0,
+        memo TEXT,
+        posted_to_ledger INTEGER DEFAULT 0,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(financing_id) REFERENCES financing_accounts(id) ON DELETE CASCADE
+        )""")
 
         # V10.7 migration for databases created by earlier versions.
         transaction_cols = [r[1] for r in c.execute("PRAGMA table_info(transactions)").fetchall()]
@@ -4117,7 +4157,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.6</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V20</span></div>",unsafe_allow_html=True)
 
 
 
@@ -6189,6 +6229,961 @@ if _theme_name == "Dark":
 
 
 
+
+# ============================================================
+# V20 — BUSINESS FINANCE / FINANCING & DEBT
+# ============================================================
+V20_FINANCING_TYPES = [
+    "Term Loan",
+    "Line of Credit",
+    "Business Credit Card",
+    "Mortgage",
+    "Equipment Financing",
+    "Vehicle Financing",
+    "Government Loan",
+    "Shareholder / Owner Loan",
+    "Lease / Finance Agreement",
+    "Other Debt",
+]
+
+V20_PAYMENT_FREQUENCIES = {
+    "Monthly": 12,
+    "Biweekly": 26,
+    "Weekly": 52,
+    "Quarterly": 4,
+    "Annual": 1,
+}
+
+
+def v20_money(value):
+    return f"${float(value or 0):,.2f}"
+
+
+def v20_scheduled_payment(principal, annual_rate, term_months, frequency="Monthly"):
+    """Standard amortizing payment estimate for fixed-rate installment debt."""
+    principal = max(float(principal or 0), 0.0)
+    annual_rate = max(float(annual_rate or 0), 0.0) / 100.0
+    term_months = max(int(term_months or 0), 0)
+    periods_per_year = V20_PAYMENT_FREQUENCIES.get(frequency, 12)
+
+    if principal <= 0 or term_months <= 0:
+        return 0.0
+
+    years = term_months / 12.0
+    n = max(int(round(years * periods_per_year)), 1)
+    periodic_rate = annual_rate / periods_per_year
+
+    if periodic_rate <= 0:
+        return principal / n
+
+    return principal * periodic_rate / (1 - (1 + periodic_rate) ** (-n))
+
+
+def v20_amortization_schedule(principal, annual_rate, term_months, frequency="Monthly", extra_payment=0.0):
+    """Return a compact amortization dataframe for scenario planning."""
+    principal = max(float(principal or 0), 0.0)
+    annual_rate = max(float(annual_rate or 0), 0.0) / 100.0
+    term_months = max(int(term_months or 0), 0)
+    extra_payment = max(float(extra_payment or 0), 0.0)
+    periods_per_year = V20_PAYMENT_FREQUENCIES.get(frequency, 12)
+
+    if principal <= 0 or term_months <= 0:
+        return pd.DataFrame(columns=[
+            "Payment #","Payment","Principal","Interest","Ending Balance"
+        ])
+
+    regular = v20_scheduled_payment(
+        principal, annual_rate * 100.0, term_months, frequency
+    )
+    periodic_rate = annual_rate / periods_per_year
+    max_periods = max(int(round((term_months / 12.0) * periods_per_year)), 1)
+
+    balance = principal
+    rows = []
+    payment_no = 0
+
+    # Allow early payoff when extra payments are entered, but cap runaway schedules.
+    while balance > 0.005 and payment_no < max(max_periods * 2, 600):
+        payment_no += 1
+        interest = balance * periodic_rate
+        planned = regular + extra_payment
+        payment = min(planned, balance + interest)
+        principal_paid = max(payment - interest, 0.0)
+        balance = max(balance - principal_paid, 0.0)
+
+        rows.append({
+            "Payment #": payment_no,
+            "Payment": round(payment, 2),
+            "Principal": round(principal_paid, 2),
+            "Interest": round(interest, 2),
+            "Ending Balance": round(balance, 2),
+        })
+
+        if balance <= 0.005:
+            break
+
+    return pd.DataFrame(rows)
+
+
+def v20_financing_accounts(active_only=False):
+    where = " WHERE status='Active'" if active_only else ""
+    return read(
+        f"""SELECT * FROM financing_accounts{where}
+            ORDER BY CASE status WHEN 'Active' THEN 0 ELSE 1 END,
+                     created_at DESC,id DESC"""
+    )
+
+
+def v20_financing_payments(financing_id=None):
+    if financing_id is None:
+        return read("""SELECT p.*,f.name AS financing_name,f.lender
+                       FROM financing_payments p
+                       JOIN financing_accounts f ON f.id=p.financing_id
+                       ORDER BY p.payment_date DESC,p.id DESC""")
+    return read("""SELECT * FROM financing_payments
+                   WHERE financing_id=?
+                   ORDER BY payment_date DESC,id DESC""",
+                (int(financing_id),))
+
+
+def v20_create_financing(data):
+    stamp = datetime.now().isoformat(timespec="seconds")
+    fields = (
+        "name","financing_type","lender","original_principal","current_balance",
+        "annual_interest_rate","rate_type","term_months","payment_frequency",
+        "scheduled_payment","start_date","maturity_date","next_payment_date",
+        "credit_limit","collateral","notes","liability_account","interest_account",
+        "cash_account","status","created_at"
+    )
+    values = tuple(data.get(k) for k in fields[:-1]) + (stamp,)
+
+    def f(c):
+        c.execute(
+            f"""INSERT INTO financing_accounts({','.join(fields)})
+                VALUES({','.join(['?'] * len(fields))})""",
+            values
+        )
+        fid = int(c.execute("SELECT last_insert_rowid()").fetchone()[0])
+        audit_row(
+            c,"Financing Created","Financing",fid,
+            {
+                "name":data.get("name"),
+                "type":data.get("financing_type"),
+                "lender":data.get("lender"),
+                "principal":data.get("original_principal"),
+                "rate":data.get("annual_interest_rate"),
+            }
+        )
+        return fid
+
+    return write(f)
+
+
+def v20_update_financing_name_status(financing_id, name, status, next_payment_date=None, notes=None):
+    def f(c):
+        c.execute(
+            """UPDATE financing_accounts
+               SET name=?,status=?,next_payment_date=?,notes=?
+               WHERE id=?""",
+            (
+                str(name or "").strip(),
+                str(status or "Active"),
+                next_payment_date,
+                notes,
+                int(financing_id),
+            )
+        )
+        audit_row(
+            c,"Financing Updated","Financing",financing_id,
+            {"name":name,"status":status,"next_payment_date":next_payment_date}
+        )
+    write(f)
+
+
+def v20_delete_financing(financing_id):
+    fid = int(financing_id)
+
+    def f(c):
+        row = c.execute(
+            "SELECT name FROM financing_accounts WHERE id=?",
+            (fid,)
+        ).fetchone()
+        if not row:
+            raise ValueError("Financing account not found.")
+        c.execute("DELETE FROM financing_payments WHERE financing_id=?", (fid,))
+        c.execute("DELETE FROM financing_accounts WHERE id=?", (fid,))
+        audit_row(c,"Financing Deleted","Financing",fid,{"name":row[0]})
+    write(f)
+
+
+def v20_estimate_payment_split(balance, annual_rate, payment_amount, frequency="Monthly"):
+    """Estimate principal/interest for the next payment."""
+    balance = max(float(balance or 0), 0.0)
+    payment_amount = max(float(payment_amount or 0), 0.0)
+    periods = V20_PAYMENT_FREQUENCIES.get(frequency, 12)
+    periodic_rate = max(float(annual_rate or 0), 0.0) / 100.0 / periods
+    interest = balance * periodic_rate
+    principal = max(payment_amount - interest, 0.0)
+    principal = min(principal, balance)
+    return round(principal, 2), round(interest, 2)
+
+
+def v20_record_financing_payment(
+    financing_id,
+    payment_date,
+    total_payment,
+    principal_amount,
+    interest_amount,
+    fee_amount=0.0,
+    memo="",
+    post_to_ledger=True,
+):
+    fid = int(financing_id)
+    total_payment = round(float(total_payment or 0), 2)
+    principal_amount = round(float(principal_amount or 0), 2)
+    interest_amount = round(float(interest_amount or 0), 2)
+    fee_amount = round(float(fee_amount or 0), 2)
+
+    if total_payment <= 0:
+        raise ValueError("Payment amount must be greater than zero.")
+    if min(principal_amount, interest_amount, fee_amount) < 0:
+        raise ValueError("Principal, interest, and fees cannot be negative.")
+
+    split_total = round(principal_amount + interest_amount + fee_amount, 2)
+    if abs(split_total - total_payment) > 0.02:
+        raise ValueError(
+            f"Principal + interest + fees must equal the total payment. "
+            f"Current split is {v20_money(split_total)}."
+        )
+
+    financing = read(
+        "SELECT * FROM financing_accounts WHERE id=?",
+        (fid,)
+    )
+    if financing.empty:
+        raise ValueError("Financing account not found.")
+
+    loan = financing.iloc[0]
+    old_balance = float(loan.current_balance or 0)
+    new_balance = max(old_balance - principal_amount, 0.0)
+    stamp = datetime.now().isoformat(timespec="seconds")
+
+    def f(c):
+        c.execute(
+            """INSERT INTO financing_payments(
+                   financing_id,payment_date,payment_amount,principal_amount,
+                   interest_amount,fee_amount,balance_after,memo,
+                   posted_to_ledger,created_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (
+                fid,str(payment_date),total_payment,principal_amount,
+                interest_amount,fee_amount,new_balance,memo,
+                1 if post_to_ledger else 0,stamp
+            )
+        )
+        pid = int(c.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+        c.execute(
+            """UPDATE financing_accounts
+               SET current_balance=?
+               WHERE id=?""",
+            (new_balance,fid)
+        )
+
+        if post_to_ledger:
+            memo_text = memo or f"{loan['name']} financing payment"
+            liability_account = str(loan.liability_account or "2200 Loan Payable")
+            interest_account = str(loan.interest_account or "6500 Interest Expense")
+            cash_account = str(loan.cash_account or "1000 Bank")
+
+            lines = []
+            if principal_amount > 0:
+                lines.append((liability_account,principal_amount,0.0))
+            if interest_amount > 0:
+                lines.append((interest_account,interest_amount,0.0))
+            if fee_amount > 0:
+                lines.append(("6700 Bank Fees",fee_amount,0.0))
+            lines.append((cash_account,0.0,total_payment))
+
+            for account,debit,credit in lines:
+                c.execute(
+                    """INSERT INTO journal_entries(
+                           transaction_id,date,memo,account,debit,credit,
+                           source_type,source_id,created_at
+                       ) VALUES(NULL,?,?,?,?,?,?,?,?)""",
+                    (
+                        str(payment_date),memo_text,account,debit,credit,
+                        "Financing Payment",str(pid),stamp
+                    )
+                )
+
+        audit_row(
+            c,"Financing Payment","Financing",fid,
+            {
+                "payment_id":pid,
+                "total":total_payment,
+                "principal":principal_amount,
+                "interest":interest_amount,
+                "fees":fee_amount,
+                "balance_after":new_balance,
+                "posted_to_ledger":bool(post_to_ledger),
+            }
+        )
+        return pid,new_balance
+
+    return write(f)
+
+
+def v20_finance_summary():
+    accounts = v20_financing_accounts(active_only=True)
+    if accounts.empty:
+        return {
+            "total_debt":0.0,
+            "monthly_debt_service":0.0,
+            "weighted_rate":0.0,
+            "available_credit":0.0,
+            "active_accounts":0,
+            "interest_ytd":0.0,
+        }
+
+    total_debt = float(pd.to_numeric(accounts["current_balance"], errors="coerce").fillna(0).sum())
+
+    # Normalize scheduled payments to monthly equivalents.
+    monthly = 0.0
+    for _, row in accounts.iterrows():
+        payment = float(row.scheduled_payment or 0)
+        freq = str(row.payment_frequency or "Monthly")
+        periods = V20_PAYMENT_FREQUENCIES.get(freq, 12)
+        monthly += payment * periods / 12.0
+
+    balances = pd.to_numeric(accounts["current_balance"], errors="coerce").fillna(0.0)
+    rates = pd.to_numeric(accounts["annual_interest_rate"], errors="coerce").fillna(0.0)
+    weighted_rate = float((balances * rates).sum() / balances.sum()) if balances.sum() > 0 else 0.0
+
+    limits = pd.to_numeric(accounts["credit_limit"], errors="coerce").fillna(0.0)
+    available_credit = float((limits - balances).clip(lower=0).sum())
+
+    year_start = date.today().replace(month=1,day=1).isoformat()
+    p = read(
+        """SELECT COALESCE(SUM(interest_amount),0) AS interest_ytd
+           FROM financing_payments
+           WHERE payment_date>=?""",
+        (year_start,)
+    )
+    interest_ytd = float(p.iloc[0].interest_ytd or 0) if not p.empty else 0.0
+
+    return {
+        "total_debt":total_debt,
+        "monthly_debt_service":monthly,
+        "weighted_rate":weighted_rate,
+        "available_credit":available_credit,
+        "active_accounts":len(accounts),
+        "interest_ytd":interest_ytd,
+    }
+
+
+def v20_render_finance():
+    st.subheader("Business Finance")
+    st.caption(
+        "Track what the business borrows, owes, pays, and finances — with loan math tied back to Sullivan's books."
+    )
+
+    signed_in = v171_is_signed_in()
+    if not signed_in:
+        st.info("Sign in to create and manage financing accounts.")
+        if st.button("Sign in to use Business Finance", type="primary", key="v20_fin_signin"):
+            v171_open_auth("Sign in to track loans, credit, and financing.")
+            st.rerun()
+        return
+
+    summary = v20_finance_summary()
+    is_dark = st.session_state.get("v19_ui_theme") == "Dark"
+
+    card_bg = "#102338" if is_dark else "#FFFFFF"
+    border = "#294763" if is_dark else "#DCE8F2"
+    text_main = "#F7FBFF" if is_dark else "#102A43"
+    text_muted = "#9FB4C8" if is_dark else "#6B7F93"
+
+    st.markdown(
+        f"""
+        <div style="
+            display:grid;
+            grid-template-columns:repeat(auto-fit,minmax(170px,1fr));
+            gap:12px;
+            margin:6px 0 18px 0;
+        ">
+            <div style="background:{card_bg};border:1px solid {border};border-radius:18px;padding:16px 18px;">
+                <div style="color:{text_muted};font-size:.75rem;font-weight:750;">TOTAL DEBT</div>
+                <div style="color:{text_main};font-size:1.55rem;font-weight:850;margin-top:4px;">{v20_money(summary["total_debt"])}</div>
+            </div>
+            <div style="background:{card_bg};border:1px solid {border};border-radius:18px;padding:16px 18px;">
+                <div style="color:{text_muted};font-size:.75rem;font-weight:750;">MONTHLY DEBT SERVICE</div>
+                <div style="color:{text_main};font-size:1.55rem;font-weight:850;margin-top:4px;">{v20_money(summary["monthly_debt_service"])}</div>
+            </div>
+            <div style="background:{card_bg};border:1px solid {border};border-radius:18px;padding:16px 18px;">
+                <div style="color:{text_muted};font-size:.75rem;font-weight:750;">WEIGHTED RATE</div>
+                <div style="color:{text_main};font-size:1.55rem;font-weight:850;margin-top:4px;">{summary["weighted_rate"]:.2f}%</div>
+            </div>
+            <div style="background:{card_bg};border:1px solid {border};border-radius:18px;padding:16px 18px;">
+                <div style="color:{text_muted};font-size:.75rem;font-weight:750;">INTEREST YTD</div>
+                <div style="color:{text_main};font-size:1.55rem;font-weight:850;margin-top:4px;">{v20_money(summary["interest_ytd"])}</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    overview_tab, accounts_tab, payments_tab, calculator_tab = st.tabs([
+        "Overview","Financing Accounts","Payments","Loan Calculator"
+    ])
+
+    with overview_tab:
+        accounts = v20_financing_accounts(active_only=True)
+
+        if accounts.empty:
+            st.info(
+                "No active financing yet. Add a loan, line of credit, mortgage, vehicle/equipment financing, "
+                "credit card, owner loan, or other debt from **Financing Accounts**."
+            )
+        else:
+            st.markdown("### Debt portfolio")
+
+            chart_df = accounts[[
+                "name","current_balance","annual_interest_rate","financing_type","lender"
+            ]].copy()
+            chart_df["current_balance"] = pd.to_numeric(
+                chart_df["current_balance"], errors="coerce"
+            ).fillna(0.0)
+
+            # Native bar chart is deliberately simple/reliable and inherits light/dark mode.
+            st.bar_chart(
+                chart_df.set_index("name")[["current_balance"]],
+                height=300,
+                width="stretch"
+            )
+
+            st.caption("Outstanding principal by financing account.")
+
+            view = accounts[[
+                "name","financing_type","lender","current_balance",
+                "annual_interest_rate","scheduled_payment","payment_frequency",
+                "next_payment_date","status"
+            ]].copy()
+            view.columns = [
+                "Account","Type","Lender","Balance","Rate %","Payment",
+                "Frequency","Next payment","Status"
+            ]
+            st.dataframe(
+                view,
+                width="stretch",
+                hide_index=True
+            )
+
+            if summary["available_credit"] > 0:
+                st.info(
+                    f"Available revolving credit currently tracked in Sullivan: "
+                    f"**{v20_money(summary['available_credit'])}**"
+                )
+
+    with accounts_tab:
+        st.markdown("### Add financing")
+        st.caption(
+            "Create the financing record first. Payments can then automatically split principal and interest and post to the ledger."
+        )
+
+        with st.expander("＋ Add loan / financing account", expanded=False):
+            left_col, right_col = st.columns(2)
+
+            with left_col:
+                fin_name = st.text_input(
+                    "Account name",
+                    placeholder="e.g. RBC Equipment Loan",
+                    key="v20_fin_name"
+                )
+                fin_type = st.selectbox(
+                    "Financing type",
+                    V20_FINANCING_TYPES,
+                    key="v20_fin_type"
+                )
+                lender = st.text_input(
+                    "Lender / creditor",
+                    placeholder="e.g. RBC",
+                    key="v20_fin_lender"
+                )
+                principal = st.number_input(
+                    "Original principal / amount borrowed",
+                    min_value=0.0,
+                    value=0.0,
+                    step=1000.0,
+                    format="%.2f",
+                    key="v20_fin_principal"
+                )
+                current_balance = st.number_input(
+                    "Current balance",
+                    min_value=0.0,
+                    value=float(principal),
+                    step=500.0,
+                    format="%.2f",
+                    key="v20_fin_balance"
+                )
+                credit_limit = st.number_input(
+                    "Credit limit (optional)",
+                    min_value=0.0,
+                    value=0.0,
+                    step=1000.0,
+                    format="%.2f",
+                    key="v20_fin_limit"
+                )
+
+            with right_col:
+                annual_rate = st.number_input(
+                    "Annual interest rate (%)",
+                    min_value=0.0,
+                    max_value=100.0,
+                    value=5.0,
+                    step=0.10,
+                    format="%.3f",
+                    key="v20_fin_rate"
+                )
+                rate_type = st.selectbox(
+                    "Rate type",
+                    ["Fixed","Variable"],
+                    key="v20_fin_rate_type"
+                )
+                term_months = st.number_input(
+                    "Term (months)",
+                    min_value=0,
+                    value=60,
+                    step=1,
+                    key="v20_fin_term"
+                )
+                frequency = st.selectbox(
+                    "Payment frequency",
+                    list(V20_PAYMENT_FREQUENCIES.keys()),
+                    key="v20_fin_frequency"
+                )
+
+                calculated = v20_scheduled_payment(
+                    current_balance, annual_rate, term_months, frequency
+                )
+                scheduled = st.number_input(
+                    "Scheduled payment",
+                    min_value=0.0,
+                    value=round(calculated, 2),
+                    step=25.0,
+                    format="%.2f",
+                    key="v20_fin_scheduled"
+                )
+
+                start_date = st.date_input(
+                    "Start date",
+                    value=date.today(),
+                    key="v20_fin_start"
+                )
+                next_date = st.date_input(
+                    "Next payment date",
+                    value=date.today(),
+                    key="v20_fin_next"
+                )
+
+            c3,c4 = st.columns(2)
+            with c3:
+                maturity_date = st.date_input(
+                    "Maturity date (optional estimate)",
+                    value=date.today() + relativedelta(months=int(term_months or 0)),
+                    key="v20_fin_maturity"
+                )
+                collateral = st.text_input(
+                    "Collateral (optional)",
+                    placeholder="Vehicle, equipment, property, etc.",
+                    key="v20_fin_collateral"
+                )
+            with c4:
+                liability_account = st.selectbox(
+                    "Liability account",
+                    ["2200 Loan Payable","2100 Credit Card Payable","2250 Accrued Expenses"],
+                    key="v20_fin_liability"
+                )
+                cash_account = st.selectbox(
+                    "Cash account",
+                    ["1000 Bank","1010 Cash"],
+                    key="v20_fin_cash"
+                )
+
+            notes = st.text_area(
+                "Notes",
+                placeholder="Purpose, agreement details, renewal terms, guarantees, etc.",
+                key="v20_fin_notes"
+            )
+
+            if calculated > 0:
+                st.caption(
+                    f"Calculated payment from the entered principal/rate/term: **{v20_money(calculated)} {frequency.lower()}**."
+                )
+
+            if st.button(
+                "Create financing account",
+                type="primary",
+                key="v20_fin_create",
+                width="stretch"
+            ):
+                try:
+                    if not str(fin_name or "").strip():
+                        raise ValueError("Enter a name for this financing account.")
+
+                    v20_create_financing({
+                        "name":str(fin_name).strip(),
+                        "financing_type":fin_type,
+                        "lender":str(lender or "").strip(),
+                        "original_principal":float(principal),
+                        "current_balance":float(current_balance),
+                        "annual_interest_rate":float(annual_rate),
+                        "rate_type":rate_type,
+                        "term_months":int(term_months),
+                        "payment_frequency":frequency,
+                        "scheduled_payment":float(scheduled),
+                        "start_date":str(start_date),
+                        "maturity_date":str(maturity_date),
+                        "next_payment_date":str(next_date),
+                        "credit_limit":float(credit_limit),
+                        "collateral":str(collateral or "").strip(),
+                        "notes":str(notes or "").strip(),
+                        "liability_account":liability_account,
+                        "interest_account":"6500 Interest Expense",
+                        "cash_account":cash_account,
+                        "status":"Active",
+                    })
+                    st.success(f"Added **{fin_name}** to Business Finance.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(str(e))
+
+        accounts = v20_financing_accounts()
+        if not accounts.empty:
+            st.markdown("### Manage financing")
+
+            for _, loan in accounts.iterrows():
+                fid = int(loan.id)
+                label = f"{loan['name']} · {v20_money(loan['current_balance'])} · {loan['status']}"
+
+                with st.expander(label, expanded=False):
+                    d1,d2,d3,d4 = st.columns(4)
+                    d1.metric("Balance", v20_money(loan.current_balance))
+                    d2.metric("Rate", f"{float(loan.annual_interest_rate or 0):.3f}%")
+                    d3.metric("Scheduled payment", v20_money(loan.scheduled_payment))
+                    d4.metric("Original principal", v20_money(loan.original_principal))
+
+                    st.write(
+                        f"**Type:** {loan.financing_type}  \n"
+                        f"**Lender:** {loan.lender or '—'}  \n"
+                        f"**Payment frequency:** {loan.payment_frequency or '—'}  \n"
+                        f"**Next payment:** {loan.next_payment_date or '—'}  \n"
+                        f"**Maturity:** {loan.maturity_date or '—'}"
+                    )
+
+                    if float(loan.credit_limit or 0) > 0:
+                        available = max(
+                            float(loan.credit_limit or 0) - float(loan.current_balance or 0),
+                            0.0
+                        )
+                        st.write(
+                            f"**Credit limit:** {v20_money(loan.credit_limit)}  \n"
+                            f"**Available:** {v20_money(available)}"
+                        )
+
+                    if loan.collateral:
+                        st.write(f"**Collateral:** {loan.collateral}")
+                    if loan.notes:
+                        st.caption(str(loan.notes))
+
+                    st.markdown("#### Settings")
+                    e1,e2 = st.columns(2)
+                    edited_name = e1.text_input(
+                        "Display name",
+                        value=str(loan["name"]),
+                        key=f"v20_edit_name_{fid}"
+                    )
+                    status_options = ["Active","Paid Off","Closed"]
+                    current_status = str(loan.status or "Active")
+                    status_index = status_options.index(current_status) if current_status in status_options else 0
+                    edited_status = e2.selectbox(
+                        "Status",
+                        status_options,
+                        index=status_index,
+                        key=f"v20_edit_status_{fid}"
+                    )
+
+                    if st.button(
+                        "Save financing settings",
+                        key=f"v20_fin_save_{fid}",
+                        width="content"
+                    ):
+                        try:
+                            v20_update_financing_name_status(
+                                fid,
+                                edited_name,
+                                edited_status,
+                                str(loan.next_payment_date or ""),
+                                str(loan.notes or "")
+                            )
+                            st.success("Financing settings saved.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
+
+                    st.markdown("#### Delete")
+                    st.caption(
+                        "Deleting removes this financing record and its financing-payment history. "
+                        "Journal entries already posted to the General Ledger are intentionally preserved."
+                    )
+                    confirm_delete = st.text_input(
+                        f'Type "{loan["name"]}" to delete',
+                        key=f"v20_fin_delete_confirm_{fid}"
+                    )
+                    if st.button(
+                        "Delete financing account",
+                        key=f"v20_fin_delete_{fid}",
+                        width="content"
+                    ):
+                        try:
+                            if confirm_delete != str(loan["name"]):
+                                raise ValueError("Type the financing name exactly to confirm deletion.")
+                            v20_delete_financing(fid)
+                            st.success("Financing account deleted.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
+
+    with payments_tab:
+        accounts = v20_financing_accounts(active_only=True)
+
+        if accounts.empty:
+            st.info("Add an active financing account before recording payments.")
+        else:
+            account_labels = {
+                f"{r['name']} · {r['lender'] or 'No lender'} · Balance {v20_money(r['current_balance'])}": int(r["id"])
+                for _, r in accounts.iterrows()
+            }
+            selected_label = st.selectbox(
+                "Financing account",
+                list(account_labels.keys()),
+                key="v20_payment_financing"
+            )
+            selected_id = account_labels[selected_label]
+            loan = accounts[accounts.id == selected_id].iloc[0]
+
+            st.markdown("### Record payment")
+            p1,p2,p3 = st.columns(3)
+            payment_date = p1.date_input(
+                "Payment date",
+                value=date.today(),
+                key="v20_payment_date"
+            )
+            total_payment = p2.number_input(
+                "Total payment",
+                min_value=0.0,
+                value=float(loan.scheduled_payment or 0),
+                step=25.0,
+                format="%.2f",
+                key="v20_payment_total"
+            )
+            fee_amount = p3.number_input(
+                "Fees",
+                min_value=0.0,
+                value=0.0,
+                step=5.0,
+                format="%.2f",
+                key="v20_payment_fee"
+            )
+
+            est_principal, est_interest = v20_estimate_payment_split(
+                loan.current_balance,
+                loan.annual_interest_rate,
+                max(total_payment - fee_amount, 0),
+                loan.payment_frequency
+            )
+
+            s1,s2 = st.columns(2)
+            principal_paid = s1.number_input(
+                "Principal",
+                min_value=0.0,
+                value=float(est_principal),
+                step=10.0,
+                format="%.2f",
+                key="v20_payment_principal"
+            )
+            interest_paid = s2.number_input(
+                "Interest",
+                min_value=0.0,
+                value=float(est_interest),
+                step=10.0,
+                format="%.2f",
+                key="v20_payment_interest"
+            )
+
+            split = principal_paid + interest_paid + fee_amount
+            remaining_after = max(float(loan.current_balance or 0) - principal_paid, 0.0)
+
+            m1,m2,m3 = st.columns(3)
+            m1.metric("Payment split", v20_money(split))
+            m2.metric("Balance after", v20_money(remaining_after))
+            m3.metric("Interest portion", v20_money(interest_paid))
+
+            payment_memo = st.text_input(
+                "Memo",
+                value=f"{loan['name']} financing payment",
+                key="v20_payment_memo"
+            )
+            post_to_ledger = st.checkbox(
+                "Post principal, interest, fees, and cash movement to the General Ledger",
+                value=True,
+                key="v20_payment_post_gl"
+            )
+
+            if post_to_ledger:
+                st.info(
+                    f"Ledger posting: principal → **{loan.liability_account}**, "
+                    f"interest → **{loan.interest_account}**, "
+                    f"cash → **{loan.cash_account}**."
+                )
+
+            if st.button(
+                "Record financing payment",
+                type="primary",
+                key="v20_payment_record",
+                width="stretch"
+            ):
+                try:
+                    _, new_balance = v20_record_financing_payment(
+                        selected_id,
+                        payment_date,
+                        total_payment,
+                        principal_paid,
+                        interest_paid,
+                        fee_amount,
+                        payment_memo,
+                        post_to_ledger
+                    )
+                    st.success(
+                        f"Payment recorded. New balance: **{v20_money(new_balance)}**."
+                    )
+                    st.rerun()
+                except Exception as e:
+                    st.error(str(e))
+
+            history = v20_financing_payments(selected_id)
+            st.markdown("### Payment history")
+            if history.empty:
+                st.caption("No payments recorded for this financing account yet.")
+            else:
+                view = history[[
+                    "payment_date","payment_amount","principal_amount",
+                    "interest_amount","fee_amount","balance_after",
+                    "posted_to_ledger","memo"
+                ]].copy()
+                view.columns = [
+                    "Date","Payment","Principal","Interest","Fees",
+                    "Balance after","Posted to GL","Memo"
+                ]
+                st.dataframe(view, width="stretch", hide_index=True)
+
+    with calculator_tab:
+        st.markdown("### Loan calculator")
+        st.caption(
+            "Model a financing scenario before adding it to Sullivan. This calculator does not create accounting entries."
+        )
+
+        c1,c2,c3,c4 = st.columns(4)
+        calc_principal = c1.number_input(
+            "Loan amount",
+            min_value=0.0,
+            value=100000.0,
+            step=5000.0,
+            format="%.2f",
+            key="v20_calc_principal"
+        )
+        calc_rate = c2.number_input(
+            "Interest rate (%)",
+            min_value=0.0,
+            max_value=100.0,
+            value=7.0,
+            step=0.1,
+            format="%.3f",
+            key="v20_calc_rate"
+        )
+        calc_term = c3.number_input(
+            "Term (months)",
+            min_value=1,
+            value=60,
+            step=1,
+            key="v20_calc_term"
+        )
+        calc_freq = c4.selectbox(
+            "Frequency",
+            list(V20_PAYMENT_FREQUENCIES.keys()),
+            key="v20_calc_freq"
+        )
+
+        extra = st.number_input(
+            "Extra payment each period",
+            min_value=0.0,
+            value=0.0,
+            step=50.0,
+            format="%.2f",
+            key="v20_calc_extra"
+        )
+
+        schedule = v20_amortization_schedule(
+            calc_principal, calc_rate, calc_term, calc_freq, extra
+        )
+
+        if not schedule.empty:
+            regular_payment = v20_scheduled_payment(
+                calc_principal, calc_rate, calc_term, calc_freq
+            )
+            total_paid = float(schedule["Payment"].sum())
+            total_interest = float(schedule["Interest"].sum())
+
+            k1,k2,k3,k4 = st.columns(4)
+            k1.metric("Regular payment", v20_money(regular_payment))
+            k2.metric("Total interest", v20_money(total_interest))
+            k3.metric("Total paid", v20_money(total_paid))
+            k4.metric("Payments to payoff", f"{len(schedule):,}")
+
+            # A polished, simple declining-balance chart that works in both themes.
+            balance_chart = schedule.set_index("Payment #")[["Ending Balance"]]
+            st.line_chart(balance_chart, height=300, width="stretch")
+
+            st.markdown("### Amortization schedule")
+            st.dataframe(
+                schedule,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "Payment": st.column_config.NumberColumn(format="$%.2f"),
+                    "Principal": st.column_config.NumberColumn(format="$%.2f"),
+                    "Interest": st.column_config.NumberColumn(format="$%.2f"),
+                    "Ending Balance": st.column_config.NumberColumn(format="$%.2f"),
+                }
+            )
+
+            if extra > 0:
+                base_schedule = v20_amortization_schedule(
+                    calc_principal, calc_rate, calc_term, calc_freq, 0
+                )
+                if not base_schedule.empty:
+                    saved_interest = (
+                        float(base_schedule["Interest"].sum()) -
+                        float(schedule["Interest"].sum())
+                    )
+                    payments_saved = len(base_schedule) - len(schedule)
+                    st.success(
+                        f"Extra payments save approximately **{v20_money(saved_interest)}** in interest "
+                        f"and **{max(payments_saved,0)} payment(s)** in this model."
+                    )
+
+
+
 # ============================================================
 # V19.6 — FREE SULLIVAN AI HELP
 # ============================================================
@@ -6352,7 +7347,7 @@ with st.sidebar:
         "Support questions do not use your normal AI points."
     )
 
-main_sections=st.tabs(["Home","Money In","Money Out","Bank","Taxes","Reports","Team","Plan & AI","Advanced","Settings"])
+main_sections=st.tabs(["Home","Money In","Money Out","Bank","Taxes","Reports","Finance","Team","Plan & AI","Advanced","Settings"])
 
 
 with main_sections[0]:
@@ -6368,6 +7363,9 @@ with main_sections[4]:
 with main_sections[5]:
     report_tabs=st.tabs(["Financial Reports","Money Owed / Bills Owed"])
 with main_sections[6]:
+    v20_render_finance()
+
+with main_sections[7]:
     st.subheader("Team")
 
     if not v171_is_signed_in():
@@ -6428,7 +7426,7 @@ with main_sections[6]:
             else:
                 st.info("Only an Owner or Manager can invite employees.")
 
-with main_sections[7]:
+with main_sections[8]:
     st.subheader("Plan & AI")
     st.caption("Manage your Sullivan membership, team seats, billing status, and AI usage.")
 
@@ -6676,14 +7674,14 @@ with main_sections[7]:
                     else:
                         st.dataframe(usage,use_container_width=True,hide_index=True)
 
-with main_sections[8]:
+with main_sections[9]:
     accountant_tabs=st.tabs([
         "Import & Analyze","Question Queue","Chart of Accounts","Opening Balances",
         "Saved Ledger","General Ledger","Manual Journals","Corrections / Reversals",
         "Accounting Periods","Smart Close","Integrity Center","Audit Trail","Accountant Export"
     ])
 
-with main_sections[9]:
+with main_sections[10]:
     st.subheader("Settings")
     st.caption("Manage your Sullivan preferences, workspaces, account details, and support options.")
 
