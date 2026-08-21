@@ -11,7 +11,7 @@ import stripe
 import requests
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V18.3.1", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V18.3.2", page_icon="S", layout="wide")
 
 
 # Sullivan V18.3 visual system: calm navy + blue + mint + warm amber.
@@ -2941,6 +2941,26 @@ def v18_company_billing(company_id):
         result["cancel_at_period_end"] = bool(remote.get("cancel_at_period_end", False))
         result["current_period_end"] = remote.get("current_period_end")
 
+        try:
+            write(lambda c: c.execute(
+                """UPDATE companies
+                   SET subscription_plan=?, subscription_status=?,
+                       ai_credit_limit=?, seat_limit=?,
+                       stripe_customer_id=?, stripe_subscription_id=?
+                   WHERE id=?""",
+                (
+                    str(result["subscription_plan"]),
+                    str(result["subscription_status"]),
+                    int(result["ai_credit_limit"]),
+                    int(result["seat_limit"]),
+                    str(result["stripe_customer_id"] or ""),
+                    str(result["stripe_subscription_id"] or ""),
+                    cid,
+                )
+            ))
+        except Exception as e:
+            print(f"Local billing sync failed for company {cid}: {e}")
+
     return result
 
 def v18_refresh_credit_period(company_id):
@@ -3209,6 +3229,12 @@ def supabase_headers():
 def v184_supabase_subscription(company_id):
     """Read the authoritative Sullivan billing record from Supabase."""
     if not supabase_ready():
+        missing = []
+        if not supabase_url():
+            missing.append("SUPABASE_URL")
+        if not supabase_secret_key():
+            missing.append("SUPABASE_SECRET_KEY")
+        print("Supabase billing disabled; missing Streamlit secret(s): " + ", ".join(missing))
         return None
 
     cid = int(company_id)
@@ -3219,25 +3245,19 @@ def v184_supabase_subscription(company_id):
     )
 
     try:
-        response = requests.get(
-            url,
-            headers=supabase_headers(),
-            timeout=10,
-        )
-
+        response = requests.get(url, headers=supabase_headers(), timeout=10)
         if response.status_code != 200:
-            print(
-                "Supabase subscription lookup failed:",
-                response.status_code,
-                response.text,
-            )
+            print(f"Supabase subscription lookup failed for company {cid}:", response.status_code, response.text)
             return None
-
         rows = response.json()
-        return rows[0] if rows else None
-
+        if not rows:
+            print(f"Supabase subscription lookup returned no row for company {cid}.")
+            return None
+        row = rows[0]
+        print(f"Supabase subscription loaded | company={cid} | plan={row.get('plan')} | status={row.get('subscription_status')}")
+        return row
     except Exception as e:
-        print("Supabase subscription lookup error:", str(e))
+        print(f"Supabase subscription lookup error for company {cid}: {e}")
         return None
 
 def stripe_secret_key():
@@ -3443,7 +3463,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V18.3.1</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V18.3.2</span></div>",unsafe_allow_html=True)
 
 
 
