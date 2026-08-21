@@ -11,7 +11,7 @@ import stripe
 import requests
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V19", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V19.2", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -2589,6 +2589,10 @@ def v17_init_auth_tables():
             c.execute("ALTER TABLE app_users ADD COLUMN auth_provider TEXT DEFAULT 'email'")
         if "provider_subject" not in user_cols:
             c.execute("ALTER TABLE app_users ADD COLUMN provider_subject TEXT")
+        if "last_workspace_company_id" not in user_cols:
+            c.execute("ALTER TABLE app_users ADD COLUMN last_workspace_company_id INTEGER")
+        if "last_workspace_mode" not in user_cols:
+            c.execute("ALTER TABLE app_users ADD COLUMN last_workspace_mode TEXT DEFAULT 'Personal'")
 
         # V18 membership / AI-credit migrations.
         company_cols = [r[1] for r in c.execute("PRAGMA table_info(companies)").fetchall()]
@@ -2772,20 +2776,114 @@ def sync_google_user():
         "auth_provider": "google",
     }
 
-def load_default_workspace_for_user(user):
-    """Select a company automatically only when there is exactly one membership."""
-    memberships = company_memberships(user["id"])
-    if len(memberships) == 1:
-        r = memberships.iloc[0]
-        st.session_state["auth_company"] = {
-            "company_id": int(r.company_id),
-            "company_code": r.company_code,
-            "company_name": r.company_name,
-            "subscription_plan": r.subscription_plan,
-        }
-        st.session_state["auth_role"] = r.role
-    elif not st.session_state.get("auth_company"):
+def _workspace_company_dict(row):
+    return {
+        "company_id": int(row.company_id),
+        "company_code": row.company_code,
+        "company_name": row.company_name,
+        "subscription_plan": row.subscription_plan,
+    }
+
+
+def save_workspace_preference(user_id, company_id=None):
+    """
+    Persist the user's last confirmed workspace.
+    Personal is stored explicitly so a refresh/login does not silently jump
+    back into a company unless that is what the user last confirmed.
+    """
+    uid = int(user_id)
+    if company_id is None:
+        write(lambda c: c.execute(
+            """UPDATE app_users
+               SET last_workspace_mode='Personal',
+                   last_workspace_company_id=NULL
+               WHERE id=?""",
+            (uid,)
+        ))
+        return
+
+    write(lambda c: c.execute(
+        """UPDATE app_users
+           SET last_workspace_mode='Company',
+               last_workspace_company_id=?
+           WHERE id=?""",
+        (int(company_id), uid)
+    ))
+
+
+def activate_workspace(user, company_row=None, persist=True):
+    """Apply one confirmed workspace selection to the entire Sullivan session."""
+    if not user:
+        return
+
+    if company_row is None:
+        st.session_state["auth_company"] = None
         st.session_state["auth_role"] = "Personal"
+        if persist:
+            save_workspace_preference(user["id"], None)
+        return
+
+    st.session_state["auth_company"] = _workspace_company_dict(company_row)
+    st.session_state["auth_role"] = str(company_row.role)
+    if persist:
+        save_workspace_preference(user["id"], int(company_row.company_id))
+
+
+def load_default_workspace_for_user(user):
+    """
+    Restore the user's last CONFIRMED workspace first.
+
+    If an older account has no saved preference yet:
+      • exactly one active company membership -> use that company
+      • otherwise -> Personal
+
+    This avoids silently changing workspaces on ordinary Streamlit reruns.
+    """
+    if not user:
+        return
+
+    # If the current Streamlit session already has a valid workspace, keep it.
+    # This prevents Google/OIDC sync on every rerun from changing the workspace.
+    existing_company = st.session_state.get("auth_company")
+    existing_role = st.session_state.get("auth_role")
+    if existing_company is not None and existing_role not in (None, "", "Guest"):
+        return
+    if existing_company is None and existing_role == "Personal":
+        return
+
+    memberships = company_memberships(user["id"])
+
+    pref = read(
+        """SELECT COALESCE(last_workspace_mode,'') AS last_workspace_mode,
+                  last_workspace_company_id
+           FROM app_users
+           WHERE id=?""",
+        (int(user["id"]),)
+    )
+
+    pref_mode = ""
+    pref_company_id = None
+    if not pref.empty:
+        pref_mode = str(pref.iloc[0].last_workspace_mode or "")
+        raw_id = pref.iloc[0].last_workspace_company_id
+        if pd.notna(raw_id):
+            pref_company_id = int(raw_id)
+
+    if pref_mode == "Company" and pref_company_id is not None and not memberships.empty:
+        match = memberships[memberships.company_id == pref_company_id]
+        if not match.empty:
+            activate_workspace(user, match.iloc[0], persist=False)
+            return
+
+    if pref_mode == "Personal":
+        activate_workspace(user, None, persist=False)
+        return
+
+    # Backward-compatible first-time default for users created before V19.2.
+    if len(memberships) == 1:
+        activate_workspace(user, memberships.iloc[0], persist=True)
+    else:
+        activate_workspace(user, None, persist=True)
 
 def authenticate_user(email,password):
     email=(email or "").strip().lower()
@@ -3536,7 +3634,12 @@ def current_company():
     return st.session_state.get("auth_company")
 
 def logout_v17():
-    for k in ["auth_user","auth_company","auth_role","show_join_company","show_create_company"]:
+    for k in [
+        "auth_user","auth_company","auth_role","show_join_company","show_create_company",
+        "v1722_workspace_select","v19_workspace_pending_label",
+        "v19_workspace_pending_company_id","v19_workspace_pending_role",
+        "v19_workspace_switched_to"
+    ]:
         st.session_state.pop(k,None)
 
 def require_company_role(*roles):
@@ -3546,7 +3649,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.1</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.2</span></div>",unsafe_allow_html=True)
 
 
 
@@ -3565,6 +3668,12 @@ if "v171_auth_reason" not in st.session_state:
     st.session_state["v171_auth_reason"] = ""
 if "v1722_workspace_open" not in st.session_state:
     st.session_state["v1722_workspace_open"] = False
+if "v19_workspace_pending_label" not in st.session_state:
+    st.session_state["v19_workspace_pending_label"] = None
+if "v19_workspace_pending_company_id" not in st.session_state:
+    st.session_state["v19_workspace_pending_company_id"] = None
+if "v19_workspace_pending_role" not in st.session_state:
+    st.session_state["v19_workspace_pending_role"] = None
 
 
 # V18.3: if Streamlit has a valid Google OIDC identity, turn it into a
@@ -3748,13 +3857,8 @@ if st.session_state.get("v171_auth_open"):
                 match=memberships[memberships.company_name==joined["company_name"]]
                 if not match.empty:
                     r=match.iloc[0]
-                    st.session_state["auth_company"]={
-                        "company_id":int(r.company_id),
-                        "company_code":r.company_code,
-                        "company_name":r.company_name,
-                        "subscription_plan":r.subscription_plan
-                    }
-                    st.session_state["auth_role"]=r.role
+                    activate_workspace(u, r, persist=True)
+                    st.session_state["v1722_workspace_select"] = f'{r.company_name} · {r.role}'
                 v171_close_auth()
                 st.success(f"Connected to {joined['company_name']}.")
                 st.rerun()
@@ -3812,26 +3916,85 @@ with st.sidebar:
                         current_label = label
                         break
 
+            # The selector chooses a DESTINATION only. It does not switch workspaces
+            # until the user explicitly confirms below.
+            if "v1722_workspace_select" not in st.session_state:
+                st.session_state["v1722_workspace_select"] = current_label
+            elif st.session_state["v1722_workspace_select"] not in options:
+                st.session_state["v1722_workspace_select"] = current_label
+
             selected = st.selectbox(
                 "Work in",
                 options,
-                index=options.index(current_label) if current_label in options else 0,
                 key="v1722_workspace_select"
             )
 
-            if selected == "Personal":
-                if auth_c is not None or st.session_state.get("auth_role") != "Personal":
-                    st.session_state["auth_company"] = None
-                    st.session_state["auth_role"] = "Personal"
-            else:
-                mr = company_by_label[selected]
-                st.session_state["auth_company"] = {
-                    "company_id": int(mr.company_id),
-                    "company_code": mr.company_code,
-                    "company_name": mr.company_name,
-                    "subscription_plan": mr.subscription_plan,
-                }
-                st.session_state["auth_role"] = mr.role
+            # If the destination changed, stage it for confirmation.
+            if selected != current_label:
+                if st.session_state.get("v19_workspace_pending_label") != selected:
+                    st.session_state["v19_workspace_pending_label"] = selected
+                    if selected == "Personal":
+                        st.session_state["v19_workspace_pending_company_id"] = None
+                        st.session_state["v19_workspace_pending_role"] = "Personal"
+                    else:
+                        pending_row = company_by_label[selected]
+                        st.session_state["v19_workspace_pending_company_id"] = int(pending_row.company_id)
+                        st.session_state["v19_workspace_pending_role"] = str(pending_row.role)
+
+            pending_label = st.session_state.get("v19_workspace_pending_label")
+            if pending_label and pending_label != current_label:
+                current_name = current_label
+                destination_name = pending_label
+
+                st.warning(
+                    f"**Switch workspace?**\n\n"
+                    f"You are currently working in **{current_name}**. "
+                    f"You are about to switch to **{destination_name}**.\n\n"
+                    "Transactions, reports, AI credits, billing, team access, and other "
+                    "workspace data will change to the selected workspace."
+                )
+
+                stay_col, switch_col = st.columns(2)
+
+                if stay_col.button(
+                    f"Stay in {current_name}",
+                    use_container_width=True,
+                    key="v19_workspace_stay"
+                ):
+                    st.session_state["v19_workspace_pending_label"] = None
+                    st.session_state["v19_workspace_pending_company_id"] = None
+                    st.session_state["v19_workspace_pending_role"] = None
+                    st.session_state["v1722_workspace_select"] = current_label
+                    st.rerun()
+
+                if switch_col.button(
+                    f"Switch to {destination_name}",
+                    type="primary",
+                    use_container_width=True,
+                    key="v19_workspace_confirm"
+                ):
+                    if pending_label == "Personal":
+                        activate_workspace(auth_u, None, persist=True)
+                    else:
+                        target_id = int(st.session_state["v19_workspace_pending_company_id"])
+                        target_match = memberships[memberships.company_id == target_id]
+                        if target_match.empty:
+                            st.session_state["v19_workspace_pending_label"] = None
+                            st.session_state["v1722_workspace_select"] = current_label
+                            st.error("That company workspace is no longer available to this account.")
+                            st.rerun()
+                        activate_workspace(auth_u, target_match.iloc[0], persist=True)
+
+                    st.session_state["v19_workspace_pending_label"] = None
+                    st.session_state["v19_workspace_pending_company_id"] = None
+                    st.session_state["v19_workspace_pending_role"] = None
+                    st.session_state["v1722_workspace_select"] = destination_name
+                    st.session_state["v19_workspace_switched_to"] = destination_name
+                    st.rerun()
+
+            if st.session_state.get("v19_workspace_switched_to"):
+                switched_to = st.session_state.pop("v19_workspace_switched_to")
+                st.success(f"Switched to **{switched_to}**.")
 
             with st.expander("Join an employer"):
                 join_code = st.text_input(
@@ -3846,13 +4009,8 @@ with st.sidebar:
                         match = memberships[memberships.company_name == joined["company_name"]]
                         if not match.empty:
                             mr = match.iloc[0]
-                            st.session_state["auth_company"] = {
-                                "company_id": int(mr.company_id),
-                                "company_code": mr.company_code,
-                                "company_name": mr.company_name,
-                                "subscription_plan": mr.subscription_plan,
-                            }
-                            st.session_state["auth_role"] = mr.role
+                            activate_workspace(auth_u, mr, persist=True)
+                            st.session_state["v1722_workspace_select"] = f'{mr.company_name} · {mr.role}'
                         st.success(f"Joined {joined['company_name']}.")
                         st.rerun()
                     except Exception as e:
@@ -3870,13 +4028,8 @@ with st.sidebar:
                         match = memberships[memberships.company_id == cid]
                         if not match.empty:
                             mr = match.iloc[0]
-                            st.session_state["auth_company"] = {
-                                "company_id": int(mr.company_id),
-                                "company_code": mr.company_code,
-                                "company_name": mr.company_name,
-                                "subscription_plan": mr.subscription_plan,
-                            }
-                            st.session_state["auth_role"] = mr.role
+                            activate_workspace(auth_u, mr, persist=True)
+                            st.session_state["v1722_workspace_select"] = f'{mr.company_name} · {mr.role}'
                         st.success(f"Company created. Company ID: {code}")
                         st.rerun()
                     except Exception as e:
