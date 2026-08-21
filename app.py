@@ -9,10 +9,10 @@ from dotenv import load_dotenv, set_key
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V18.1", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V18.2", page_icon="S", layout="wide")
 
 
-# Sullivan V18.1 visual system: calm navy + blue + mint + warm amber.
+# Sullivan V18.2 visual system: calm navy + blue + mint + warm amber.
 APP_DIR = Path(__file__).resolve().parent
 ENV_PATH = APP_DIR / ".env"
 DB_PATH = APP_DIR / "sullivan.db"
@@ -122,6 +122,18 @@ SULLIVAN_PLANS = {
         "ai_credits": 10000,
         "seat_limit": 15,
         "label": "Growing business",
+    },
+    "Accounting Firm": {
+        "price": 250,
+        "ai_credits": 30000,
+        "seat_limit": 50,
+        "label": "Accounting teams and multi-client firms",
+    },
+    "Enterprise": {
+        "price": None,
+        "ai_credits": 0,
+        "seat_limit": 51,
+        "label": "Custom teams with 51+ people",
     },
 }
 
@@ -2569,7 +2581,7 @@ def v17_init_auth_tables():
             used_by_user_id INTEGER,
             used_at TEXT
         )""")
-        # V18.1 migrations for Google/OIDC identities.
+        # V18.2 migrations for Google/OIDC identities.
         user_cols = [r[1] for r in c.execute("PRAGMA table_info(app_users)").fetchall()]
         if "auth_provider" not in user_cols:
             c.execute("ALTER TABLE app_users ADD COLUMN auth_provider TEXT DEFAULT 'email'")
@@ -2620,6 +2632,17 @@ def v17_init_auth_tables():
             confidence REAL DEFAULT 0,
             explanation TEXT,
             question TEXT,
+            created_at TEXT NOT NULL
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS enterprise_quotes(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL,
+            requested_by_user_id INTEGER,
+            requested_seats INTEGER NOT NULL,
+            expected_ai_usage TEXT,
+            estimated_monthly_price REAL,
+            quote_summary TEXT,
+            status TEXT DEFAULT 'Estimate',
             created_at TEXT NOT NULL
         )""")
     write(f)
@@ -3047,6 +3070,62 @@ def v18_demo_result(company_id=None):
               FROM ai_demo_results WHERE company_id=?""",(cid,))
     return None if d.empty else d.iloc[0].to_dict()
 
+
+def v18_enterprise_quote(seats, expected_ai_usage="Standard"):
+    """
+    Produce a non-binding enterprise estimate for 51+ people.
+    This intentionally does not activate a plan or create a legal commitment.
+    """
+    seats=int(seats)
+    if seats < 51:
+        raise ValueError("Enterprise quotes start at 51 people.")
+
+    usage=str(expected_ai_usage or "Standard")
+    # Internal estimate model for testing before Stripe/contracts are connected.
+    base=250.0
+    extra_seats=seats-50
+    per_seat=4.50
+
+    usage_multiplier={
+        "Light": 0.90,
+        "Standard": 1.00,
+        "Heavy": 1.20,
+        "Very heavy": 1.45,
+    }.get(usage,1.00)
+
+    estimate=round((base + extra_seats*per_seat)*usage_multiplier,2)
+
+    if seats >= 500:
+        estimate=round(estimate*0.90,2)
+    elif seats >= 250:
+        estimate=round(estimate*0.94,2)
+    elif seats >= 100:
+        estimate=round(estimate*0.97,2)
+
+    return {
+        "seats":seats,
+        "usage":usage,
+        "estimate":estimate,
+        "summary":(
+            f"Estimated Sullivan Enterprise price for {seats} people with "
+            f"{usage.lower()} AI usage: ${estimate:,.2f}/month. "
+            "This is a preliminary estimate, not a binding contract."
+        )
+    }
+
+def v18_save_enterprise_quote(company_id,seats,expected_ai_usage,estimate,summary):
+    user=current_user() or {}
+    uid=user.get("id")
+    stamp=datetime.now().isoformat(timespec="seconds")
+    def f(c):
+        c.execute("""INSERT INTO enterprise_quotes(
+                         company_id,requested_by_user_id,requested_seats,expected_ai_usage,
+                         estimated_monthly_price,quote_summary,status,created_at
+                     ) VALUES(?,?,?,?,?,?,'Estimate',?)""",
+                  (int(company_id),int(uid) if uid else None,int(seats),
+                   str(expected_ai_usage),float(estimate),str(summary),stamp))
+    write(f)
+
 def current_user():
     return st.session_state.get("auth_user")
 
@@ -3069,7 +3148,7 @@ st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center 
 
 
 # ==========================
-# V18.1 guest-first access
+# V18.2 guest-first access
 # ==========================
 if "auth_user" not in st.session_state:
     st.session_state["auth_user"] = None
@@ -3085,7 +3164,7 @@ if "v1722_workspace_open" not in st.session_state:
     st.session_state["v1722_workspace_open"] = False
 
 
-# V18.1: if Streamlit has a valid Google OIDC identity, turn it into a
+# V18.2: if Streamlit has a valid Google OIDC identity, turn it into a
 # Sullivan account automatically after Google redirects back to the app.
 if _streamlit_oidc_logged_in():
     try:
@@ -3528,7 +3607,7 @@ div.stButton>button:hover{border-color:#1769E0!important;color:#1769E0!important
 }
 
 
-/* V18.1 — readable forms everywhere */
+/* V18.2 — readable forms everywhere */
 .main input,
 .main textarea,
 section.main input,
@@ -3612,7 +3691,7 @@ section.main textarea,
 
 
 
-/* V18.1 — sidebar readability fix */
+/* V18.2 — sidebar readability fix */
 section[data-testid="stSidebar"] label,
 section[data-testid="stSidebar"] label p,
 section[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p,
@@ -3631,7 +3710,7 @@ section[data-testid="stSidebar"] div[data-baseweb="select"] span {
 
 
 
-/* V18.1 polished Sullivan sidebar */
+/* V18.2 polished Sullivan sidebar */
 section[data-testid="stSidebar"] {
     background:
         linear-gradient(180deg,#061A30 0%,#07223D 55%,#082B4B 100%) !important;
@@ -3811,7 +3890,7 @@ section[data-testid="stSidebar"] [data-testid="stAlert"] * {
 
 
 
-/* V18.1 full contrast safety pass */
+/* V18.2 full contrast safety pass */
 
 /* MAIN WORKSPACE */
 [data-testid="stAppViewContainer"] label,
@@ -3899,7 +3978,7 @@ button[aria-label="Help"] svg {
     stroke:#52677B !important;
 }
 
-/* V18.1: Streamlit renders help icons differently by widget type.
+/* V18.2: Streamlit renders help icons differently by widget type.
    Force every widget-label help trigger to use the same clean question-mark treatment. */
 [data-testid="stWidgetLabel"] button,
 [data-testid="stWidgetLabel"] [role="button"],
@@ -4087,7 +4166,7 @@ section[data-testid="stSidebar"] [data-testid="stAlert"] * {
     color:#FFFFFF !important;
 }
 
-/* V18.1 — FINAL HELP ICON FIX
+/* V18.2 — FINAL HELP ICON FIX
    TextInput/NumberInput have broad button rules above for password/stepper controls.
    Streamlit places label help triggers inside those widget containers too, so those rules
    were repainting the help SVG as a solid dot. Keep this override LAST so help icons
@@ -4184,7 +4263,7 @@ button[data-baseweb="tab"]:not([aria-selected="true"]) p {
 
 
 
-/* V18.1 guest-first authentication */
+/* V18.2 guest-first authentication */
 .guest-card{
     background:rgba(255,255,255,.06);
     border:1px solid rgba(255,255,255,.10);
@@ -4398,9 +4477,10 @@ with main_sections[7]:
                         )
 
                 st.markdown("### Sullivan plans")
+
                 p1,p2,p3=st.columns(3)
-                plan_cols=[(p1,"Starter"),(p2,"Business"),(p3,"Pro")]
-                for col,name in plan_cols:
+                first_row=[(p1,"Starter"),(p2,"Business"),(p3,"Pro")]
+                for col,name in first_row:
                     spec=SULLIVAN_PLANS[name]
                     with col:
                         st.markdown(f"### {name}")
@@ -4416,9 +4496,78 @@ with main_sections[7]:
                             key=f"v18_plan_{name.lower()}"
                         )
 
+                f1,f2=st.columns(2)
+
+                with f1:
+                    spec=SULLIVAN_PLANS["Accounting Firm"]
+                    st.markdown("### Accounting Firm")
+                    st.markdown("## $250/mo")
+                    st.write("Built for accounting firms and larger finance teams.")
+                    st.write("**30,000** AI credits / month")
+                    st.write("**Up to 50 people**")
+                    st.write("Designed for future multi-client workspace management.")
+                    st.caption("Normal accounting actions do not use AI credits.")
+                    st.button(
+                        "Stripe checkout coming next",
+                        disabled=True,
+                        use_container_width=True,
+                        key="v18_plan_accounting_firm"
+                    )
+
+                with f2:
+                    st.markdown("### Enterprise")
+                    st.markdown("## Custom quote")
+                    st.write("For organizations needing **51+ people**.")
+                    st.write("Seat limits and AI allowances are customized.")
+                    st.write("Get a preliminary Sullivan estimate below.")
+                    st.caption("Final enterprise pricing requires approval before any contract is created.")
+
+                st.markdown("### Enterprise quote")
+                st.write(
+                    "Enter how many people need Sullivan. This calculator starts at 51 people "
+                    "and gives a preliminary AI-assisted estimate for planning."
+                )
+
+                q1,q2=st.columns([1,1])
+                quote_seats=q1.number_input(
+                    "How many people need access?",
+                    min_value=51,
+                    value=75,
+                    step=1,
+                    key="v182_enterprise_seats"
+                )
+                quote_usage=q2.selectbox(
+                    "Expected Sullivan AI usage",
+                    ["Light","Standard","Heavy","Very heavy"],
+                    index=1,
+                    key="v182_enterprise_ai_usage"
+                )
+
+                if st.button("✨ Get enterprise AI quote",type="primary",key="v182_enterprise_quote"):
+                    try:
+                        quote=v18_enterprise_quote(quote_seats,quote_usage)
+                        v18_save_enterprise_quote(
+                            cid,quote["seats"],quote["usage"],quote["estimate"],quote["summary"]
+                        )
+                        st.session_state["v182_quote"]=quote
+                    except Exception as e:
+                        st.error(str(e))
+
+                if st.session_state.get("v182_quote"):
+                    quote=st.session_state["v182_quote"]
+                    st.success("Preliminary Sullivan Enterprise estimate")
+                    qv1,qv2=st.columns(2)
+                    qv1.metric("People",f'{quote["seats"]:,}')
+                    qv2.metric("Estimated monthly price",f'${quote["estimate"]:,.2f}')
+                    st.write(quote["summary"])
+                    st.caption(
+                        "This estimate does not activate a plan, charge a card, or create a binding agreement. "
+                        "A final enterprise quote would be approved before purchase."
+                    )
+
                 st.info(
-                    "V18 builds the membership engine first. No plan is activated by clicking a fake payment button. "
-                    "The next billing version will let Stripe securely activate Starter, Business, or Pro after payment."
+                    "V18.2 still does not activate paid plans. Stripe billing is the next connection step, "
+                    "so no disabled plan button can accidentally grant paid access."
                 )
 
                 usage=read("""SELECT action,credits,source,detail,created_at
@@ -4437,7 +4586,7 @@ with main_sections[8]:
         "Accounting Periods","Smart Close","Integrity Center","Audit Trail","Accountant Export"
     ])
 
-# V18.1 navigation / action clarity
+# V18.2 navigation / action clarity
 if st.session_state.get("v13_destination"):
     st.success("You are looking for: **" + st.session_state["v13_destination"] + "**")
     if st.button("Clear destination"):
@@ -4578,7 +4727,7 @@ with home_tabs[0]:
             st.markdown('<div class="panel-v15">'+rows+'</div>',unsafe_allow_html=True)
 
     st.markdown(
-        '<footer class="footer-v15"><span>🛡 Your data is protected &nbsp; • &nbsp; Accounting controls are active &nbsp; • &nbsp; Advanced tools stay available</span><b>◆ Sullivan <small>V18.1</small></b></footer>',
+        '<footer class="footer-v15"><span>🛡 Your data is protected &nbsp; • &nbsp; Accounting controls are active &nbsp; • &nbsp; Advanced tools stay available</span><b>◆ Sullivan <small>V18.2</small></b></footer>',
         unsafe_allow_html=True
     )
 
@@ -6202,4 +6351,4 @@ with accountant_tabs[12]:
         with open(path,"rb") as f:st.download_button("Download package",f.read(),"sullivan_v15_4_accountant_package.zip","application/zip")
 
 st.divider()
-st.caption("Sullivan V18.1 globally enforces closed accounting periods while retaining V12.3 automatic document numbering.")
+st.caption("Sullivan V18.2 globally enforces closed accounting periods while retaining V12.3 automatic document numbering.")
