@@ -9,10 +9,10 @@ from dotenv import load_dotenv, set_key
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V17.2", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V17.2.1", page_icon="S", layout="wide")
 
 
-# Sullivan V17.2 visual system: calm navy + blue + mint + warm amber.
+# Sullivan V17.2.1 visual system: calm navy + blue + mint + warm amber.
 APP_DIR = Path(__file__).resolve().parent
 ENV_PATH = APP_DIR / ".env"
 DB_PATH = APP_DIR / "sullivan.db"
@@ -2520,7 +2520,7 @@ def v17_init_auth_tables():
             used_by_user_id INTEGER,
             used_at TEXT
         )""")
-        # V17.2 migrations for Google/OIDC identities.
+        # V17.2.1 migrations for Google/OIDC identities.
         user_cols = [r[1] for r in c.execute("PRAGMA table_info(app_users)").fetchall()]
         if "auth_provider" not in user_cols:
             c.execute("ALTER TABLE app_users ADD COLUMN auth_provider TEXT DEFAULT 'email'")
@@ -2607,7 +2607,7 @@ def sync_google_user():
                        user_code,email,full_name,password_salt,password_hash,
                        personal_account,active,created_at,last_login_at,
                        auth_provider,provider_subject
-                   ) VALUES(?,?,?,?,?,?,1,?,?,?,?,?)""",
+                   ) VALUES(?,?,?,?,?,?,1,?,?,?,?)""",
                 (
                     user_code, email, full_name, salt, password_hash,
                     1, stamp, stamp, "google", subject
@@ -2761,7 +2761,7 @@ st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center 
 
 
 # ==========================
-# V17.2 guest-first access
+# V17.2.1 guest-first access
 # ==========================
 if "auth_user" not in st.session_state:
     st.session_state["auth_user"] = None
@@ -2775,7 +2775,7 @@ if "v171_auth_reason" not in st.session_state:
     st.session_state["v171_auth_reason"] = ""
 
 
-# V17.2: if Streamlit has a valid Google OIDC identity, turn it into a
+# V17.2.1: if Streamlit has a valid Google OIDC identity, turn it into a
 # Sullivan account automatically after Google redirects back to the app.
 if _streamlit_oidc_logged_in():
     try:
@@ -3116,7 +3116,7 @@ div.stButton>button:hover{border-color:#1769E0!important;color:#1769E0!important
 }
 
 
-/* V17.2 — readable forms everywhere */
+/* V17.2.1 — readable forms everywhere */
 .main input,
 .main textarea,
 section.main input,
@@ -3200,7 +3200,7 @@ section.main textarea,
 
 
 
-/* V17.2 — sidebar readability fix */
+/* V17.2.1 — sidebar readability fix */
 section[data-testid="stSidebar"] label,
 section[data-testid="stSidebar"] label p,
 section[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p,
@@ -3219,7 +3219,7 @@ section[data-testid="stSidebar"] div[data-baseweb="select"] span {
 
 
 
-/* V17.2 polished Sullivan sidebar */
+/* V17.2.1 polished Sullivan sidebar */
 section[data-testid="stSidebar"] {
     background:
         linear-gradient(180deg,#061A30 0%,#07223D 55%,#082B4B 100%) !important;
@@ -3399,7 +3399,7 @@ section[data-testid="stSidebar"] [data-testid="stAlert"] * {
 
 
 
-/* V17.2 full contrast safety pass */
+/* V17.2.1 full contrast safety pass */
 
 /* MAIN WORKSPACE */
 [data-testid="stAppViewContainer"] label,
@@ -3487,7 +3487,7 @@ button[aria-label="Help"] svg {
     stroke:#52677B !important;
 }
 
-/* V17.2: Streamlit renders help icons differently by widget type.
+/* V17.2.1: Streamlit renders help icons differently by widget type.
    Force every widget-label help trigger to use the same clean question-mark treatment. */
 [data-testid="stWidgetLabel"] button,
 [data-testid="stWidgetLabel"] [role="button"],
@@ -3675,7 +3675,7 @@ section[data-testid="stSidebar"] [data-testid="stAlert"] * {
     color:#FFFFFF !important;
 }
 
-/* V17.2 — FINAL HELP ICON FIX
+/* V17.2.1 — FINAL HELP ICON FIX
    TextInput/NumberInput have broad button rules above for password/stepper controls.
    Streamlit places label help triggers inside those widget containers too, so those rules
    were repainting the help SVG as a solid dot. Keep this override LAST so help icons
@@ -3730,7 +3730,7 @@ button[data-baseweb="tab"]:not([aria-selected="true"]) p {
 
 
 
-/* V17.2 guest-first authentication */
+/* V17.2.1 guest-first authentication */
 .guest-card{
     background:rgba(255,255,255,.06);
     border:1px solid rgba(255,255,255,.10);
@@ -3861,7 +3861,7 @@ with main_sections[7]:
         "Accounting Periods","Smart Close","Integrity Center","Audit Trail","Accountant Export"
     ])
 
-# V17.2 navigation / action clarity
+# V17.2.1 navigation / action clarity
 if st.session_state.get("v13_destination"):
     st.success("You are looking for: **" + st.session_state["v13_destination"] + "**")
     if st.button("Clear destination"):
@@ -4002,7 +4002,7 @@ with home_tabs[0]:
             st.markdown('<div class="panel-v15">'+rows+'</div>',unsafe_allow_html=True)
 
     st.markdown(
-        '<footer class="footer-v15"><span>🛡 Your data is protected &nbsp; • &nbsp; Accounting controls are active &nbsp; • &nbsp; Advanced tools stay available</span><b>◆ Sullivan <small>V17.2</small></b></footer>',
+        '<footer class="footer-v15"><span>🛡 Your data is protected &nbsp; • &nbsp; Accounting controls are active &nbsp; • &nbsp; Advanced tools stay available</span><b>◆ Sullivan <small>V17.2.1</small></b></footer>',
         unsafe_allow_html=True
     )
 
@@ -5626,4 +5626,4 @@ with accountant_tabs[12]:
         with open(path,"rb") as f:st.download_button("Download package",f.read(),"sullivan_v15_4_accountant_package.zip","application/zip")
 
 st.divider()
-st.caption("Sullivan V17.2 globally enforces closed accounting periods while retaining V12.3 automatic document numbering.")
+st.caption("Sullivan V17.2.1 globally enforces closed accounting periods while retaining V12.3 automatic document numbering.")
