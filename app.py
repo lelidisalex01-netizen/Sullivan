@@ -11,7 +11,7 @@ import stripe
 import requests
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V19.3", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V19.4", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -2750,6 +2750,8 @@ def v17_init_auth_tables():
             c.execute("ALTER TABLE app_users ADD COLUMN last_workspace_company_id INTEGER")
         if "last_workspace_mode" not in user_cols:
             c.execute("ALTER TABLE app_users ADD COLUMN last_workspace_mode TEXT DEFAULT 'Personal'")
+        if "ui_theme" not in user_cols:
+            c.execute("ALTER TABLE app_users ADD COLUMN ui_theme TEXT DEFAULT 'Light'")
 
         # V18 membership / AI-credit migrations.
         company_cols = [r[1] for r in c.execute("PRAGMA table_info(companies)").fetchall()]
@@ -3043,6 +3045,99 @@ def load_default_workspace_for_user(user):
         activate_workspace(user, memberships.iloc[0], persist=True)
     else:
         activate_workspace(user, None, persist=True)
+
+
+def get_user_ui_theme(user_id):
+    if not user_id:
+        return "Light"
+    c = raw_connect()
+    try:
+        row = c.execute(
+            "SELECT COALESCE(ui_theme,'Light') FROM app_users WHERE id=?",
+            (int(user_id),)
+        ).fetchone()
+        theme = str(row[0] or "Light") if row else "Light"
+        return theme if theme in ("Light", "Dark") else "Light"
+    finally:
+        c.close()
+
+
+def save_user_ui_theme(user_id, theme):
+    theme = str(theme or "Light")
+    if theme not in ("Light", "Dark"):
+        raise ValueError("Unknown display theme.")
+    c = raw_connect()
+    try:
+        c.execute(
+            "UPDATE app_users SET ui_theme=? WHERE id=?",
+            (theme, int(user_id))
+        )
+    finally:
+        c.close()
+
+
+def rename_company_workspace(user_id, company_id, new_name):
+    uid = int(user_id)
+    cid = int(company_id)
+    new_name = str(new_name or "").strip()
+
+    if not new_name:
+        raise ValueError("Enter a company name.")
+    if len(new_name) > 120:
+        raise ValueError("Company name is too long.")
+
+    c = raw_connect()
+    try:
+        owner = c.execute(
+            """SELECT 1 FROM company_members
+               WHERE company_id=? AND user_id=? AND role='Owner' AND status='Active'
+               LIMIT 1""",
+            (cid, uid)
+        ).fetchone()
+        if not owner:
+            raise ValueError("Only a company Owner can rename this workspace.")
+
+        company = c.execute(
+            "SELECT company_name FROM companies WHERE id=?",
+            (cid,)
+        ).fetchone()
+        if not company:
+            raise ValueError("Company workspace not found.")
+
+        old_name = str(company[0])
+        c.execute(
+            "UPDATE companies SET company_name=? WHERE id=?",
+            (new_name, cid)
+        )
+        return old_name, new_name
+    finally:
+        c.close()
+
+
+def owned_company_workspaces(user_id):
+    c = raw_connect()
+    try:
+        rows = c.execute(
+            """SELECT c.id,c.company_code,c.company_name,c.subscription_plan,
+                      c.subscription_status,c.stripe_customer_id,c.stripe_subscription_id,
+                      m.role,c.created_at
+               FROM company_members m
+               JOIN companies c ON c.id=m.company_id
+               WHERE m.user_id=? AND m.status='Active' AND c.status='Active'
+                     AND m.role='Owner'
+               ORDER BY c.company_name,c.id""",
+            (int(user_id),)
+        ).fetchall()
+    finally:
+        c.close()
+
+    cols = [
+        "company_id","company_code","company_name","subscription_plan",
+        "subscription_status","stripe_customer_id","stripe_subscription_id",
+        "role","created_at"
+    ]
+    return pd.DataFrame(rows, columns=cols)
+
 
 def authenticate_user(email,password):
     email=(email or "").strip().lower()
@@ -4020,7 +4115,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.3</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.4</span></div>",unsafe_allow_html=True)
 
 
 
@@ -4239,7 +4334,7 @@ if st.session_state.get("v171_auth_open"):
                 if not match.empty:
                     r=match.iloc[0]
                     activate_workspace(u, r, persist=True)
-                    st.session_state["v19_workspace_select_reset"] = f'{r.company_name} · {r.role}'
+                    st.session_state["v19_workspace_select_reset"] = f'{r.company_name} · {r.role} · {r.company_code}'
                 v171_close_auth()
                 st.success(f"Connected to {joined['company_name']}.")
                 st.rerun()
@@ -4286,7 +4381,7 @@ with st.sidebar:
             company_by_label = {}
             if not memberships.empty:
                 for _, mr in memberships.iterrows():
-                    label = f'{mr.company_name} · {mr.role}'
+                    label = f'{mr.company_name} · {mr.role} · {mr.company_code}'
                     options.append(label)
                     company_by_label[label] = mr
 
@@ -4399,7 +4494,7 @@ with st.sidebar:
                         if not match.empty:
                             mr = match.iloc[0]
                             activate_workspace(auth_u, mr, persist=True)
-                            st.session_state["v19_workspace_select_reset"] = f'{mr.company_name} · {mr.role}'
+                            st.session_state["v19_workspace_select_reset"] = f'{mr.company_name} · {mr.role} · {mr.company_code}'
                         st.success(f"Joined {joined['company_name']}.")
                         st.rerun()
                     except Exception as e:
@@ -4418,7 +4513,7 @@ with st.sidebar:
                         if not match.empty:
                             mr = match.iloc[0]
                             activate_workspace(auth_u, mr, persist=True)
-                            st.session_state["v19_workspace_select_reset"] = f'{mr.company_name} · {mr.role}'
+                            st.session_state["v19_workspace_select_reset"] = f'{mr.company_name} · {mr.role} · {mr.company_code}'
                         st.success(f"Company created. Company ID: {code}")
                         st.rerun()
                     except Exception as e:
@@ -5345,8 +5440,93 @@ button[data-baseweb="tab"]:not([aria-selected="true"]) p {
 </style>
 """,unsafe_allow_html=True)
 
+# V19.4 per-user appearance preference.
+_theme_user = current_user()
+_theme_name = get_user_ui_theme(_theme_user["id"]) if _theme_user else "Light"
+st.session_state["v19_ui_theme"] = _theme_name
 
-main_sections=st.tabs(["Home","Money In","Money Out","Bank","Taxes","Reports","Team","Plan & AI","Advanced"])
+if _theme_name == "Dark":
+    st.markdown("""
+    <style>
+    html, body,
+    [data-testid="stAppViewContainer"],
+    [data-testid="stMain"],
+    .stApp {
+        background:#0C1724 !important;
+        color:#E8F0F7 !important;
+    }
+
+    [data-testid="stMainBlockContainer"] {
+        background:#0C1724 !important;
+    }
+
+    [data-testid="stSidebar"] {
+        background:#071321 !important;
+        border-right:1px solid #203449 !important;
+    }
+
+    [data-testid="stSidebar"] * {
+        color:#EAF2F8;
+    }
+
+    h1,h2,h3,h4,h5,h6,p,label,span,
+    .stMarkdown,.stCaption,
+    [data-testid="stMetricLabel"],
+    [data-testid="stMetricValue"] {
+        color:#E8F0F7 !important;
+    }
+
+    .account-strip,.workspace-card,.auth-note,.guest-card,.auth-overlay-card,
+    [data-testid="stMetric"],
+    div[data-testid="stExpander"],
+    div[data-testid="stForm"] {
+        background:#122234 !important;
+        border-color:#29415A !important;
+        color:#E8F0F7 !important;
+    }
+
+    div[data-baseweb="input"] > div,
+    div[data-baseweb="select"] > div,
+    textarea,
+    input {
+        background:#0F1D2B !important;
+        color:#F3F7FA !important;
+        -webkit-text-fill-color:#F3F7FA !important;
+        border-color:#36516D !important;
+    }
+
+    div[data-baseweb="select"] svg,
+    button svg {
+        fill:currentColor;
+    }
+
+    button[data-baseweb="tab"]:not([aria-selected="true"]) {
+        background:#122234 !important;
+        color:#C7D6E4 !important;
+    }
+
+    button[data-baseweb="tab"][aria-selected="true"] {
+        background:#1769E0 !important;
+        color:#FFFFFF !important;
+    }
+
+    [data-testid="stDataFrame"],
+    [data-testid="stTable"] {
+        background:#101F2F !important;
+    }
+
+    hr {
+        border-color:#29415A !important;
+    }
+
+    a {
+        color:#6EAEFF !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+
+main_sections=st.tabs(["Home","Money In","Money Out","Bank","Taxes","Reports","Team","Plan & AI","Advanced","Settings"])
 
 
 with main_sections[0]:
@@ -5424,7 +5604,7 @@ with main_sections[6]:
 
 with main_sections[7]:
     st.subheader("Plan & AI")
-    st.caption("Your Sullivan membership controls team seats and AI usage. Stripe billing is the next connection step.")
+    st.caption("Manage your Sullivan membership, team seats, billing status, and AI usage.")
 
     if not v171_is_signed_in():
         st.info("Browse freely. Sign in when you're ready to create a company and try Sullivan AI.")
@@ -5676,6 +5856,191 @@ with main_sections[8]:
         "Saved Ledger","General Ledger","Manual Journals","Corrections / Reversals",
         "Accounting Periods","Smart Close","Integrity Center","Audit Trail","Accountant Export"
     ])
+
+with main_sections[9]:
+    st.subheader("Settings")
+    st.caption("Manage your Sullivan preferences, workspaces, account details, and support options.")
+
+    settings_user = current_user()
+
+    if not settings_user:
+        st.info("Sign in to manage Sullivan settings.")
+        if st.button("Sign in to open settings", type="primary", key="v194_settings_signin"):
+            v171_open_auth("Sign in to manage your Sullivan settings.")
+            st.rerun()
+    else:
+        pref_tab, workspace_tab, support_tab, account_tab = st.tabs([
+            "Preferences","Workspaces","Help & Support","Account"
+        ])
+
+        with pref_tab:
+            st.markdown("### Appearance")
+            current_theme = get_user_ui_theme(settings_user["id"])
+            chosen_theme = st.radio(
+                "Theme",
+                ["Light","Dark"],
+                index=0 if current_theme == "Light" else 1,
+                horizontal=True,
+                key="v194_theme_choice"
+            )
+            st.caption(
+                "Dark mode changes Sullivan's interface only. Your accounting data and reports are not changed."
+            )
+
+            if st.button("Save appearance", type="primary", key="v194_save_theme"):
+                try:
+                    save_user_ui_theme(settings_user["id"], chosen_theme)
+                    st.session_state["v19_ui_theme"] = chosen_theme
+                    st.success(f"Appearance saved: {chosen_theme} mode.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(str(e))
+
+            st.markdown("### Workspace behavior")
+            active_settings_company = current_company()
+            if active_settings_company:
+                st.info(
+                    f'Current workspace: **{active_settings_company["company_name"]}** '
+                    f'({active_settings_company["company_code"]})'
+                )
+            else:
+                st.info("Current workspace: **Personal**")
+
+            st.caption(
+                "Sullivan remembers the last workspace you confirmed. Switching workspaces always asks for confirmation."
+            )
+
+        with workspace_tab:
+            st.markdown("### Workspace manager")
+            st.write(
+                "Review every company workspace you own. Company IDs are shown so duplicate names can always be distinguished."
+            )
+
+            owner_workspaces = owned_company_workspaces(settings_user["id"])
+
+            if owner_workspaces.empty:
+                st.info("You do not own any company workspaces yet.")
+            else:
+                for _, wr in owner_workspaces.iterrows():
+                    wid = int(wr.company_id)
+                    wname = str(wr.company_name)
+                    wcode = str(wr.company_code)
+                    wplan = str(wr.subscription_plan or "Trial")
+                    wstatus = str(wr.subscription_status or "Trial")
+
+                    with st.expander(f"{wname} · {wcode}", expanded=False):
+                        c1,c2,c3 = st.columns(3)
+                        c1.metric("Plan", wplan)
+                        c2.metric("Subscription", wstatus)
+                        c3.metric("Company ID", wid)
+
+                        is_active = bool(
+                            current_company()
+                            and int(current_company().get("company_id", -1)) == wid
+                        )
+                        if is_active:
+                            st.success("This is your current workspace.")
+
+                        st.markdown("#### Rename workspace")
+                        new_workspace_name = st.text_input(
+                            "Company name",
+                            value=wname,
+                            key=f"v194_rename_name_{wid}"
+                        )
+                        if st.button(
+                            "Rename company",
+                            key=f"v194_rename_btn_{wid}",
+                            width="content"
+                        ):
+                            try:
+                                old_name, renamed = rename_company_workspace(
+                                    settings_user["id"], wid, new_workspace_name
+                                )
+                                if is_active and st.session_state.get("auth_company"):
+                                    st.session_state["auth_company"]["company_name"] = renamed
+                                st.session_state["v19_workspace_select_reset"] = None
+                                st.success(f'Renamed "{old_name}" to "{renamed}".')
+                                st.rerun()
+                            except Exception as e:
+                                st.error(str(e))
+
+                        st.markdown("#### Delete workspace")
+                        st.warning(
+                            "Permanent deletion removes this company's Sullivan bookkeeping workspace. "
+                            "This cannot be undone."
+                        )
+                        delete_confirm = st.text_input(
+                            f'Type "{wname}" to delete this company',
+                            key=f"v194_delete_name_{wid}"
+                        )
+
+                        if st.button(
+                            "Delete company permanently",
+                            key=f"v194_delete_btn_{wid}",
+                            width="content"
+                        ):
+                            try:
+                                deleted_name = delete_company_workspace(
+                                    settings_user["id"], wid, delete_confirm
+                                )
+
+                                if is_active:
+                                    activate_workspace(settings_user, None, persist=True)
+                                    st.session_state["v19_workspace_select_reset"] = "Personal"
+
+                                st.success(f'Deleted company workspace "{deleted_name}".')
+                                st.rerun()
+                            except Exception as e:
+                                st.error(str(e))
+
+            st.divider()
+            st.caption(
+                "Personal is your private Sullivan account and cannot be deleted here. "
+                "Each company and Personal have completely separate bookkeeping records."
+            )
+
+        with support_tab:
+            st.markdown("### Help & Support")
+
+            support_email = _secret_value("SULLIVAN_SUPPORT_EMAIL", "")
+            if support_email:
+                st.write(f"**Customer service email:** {support_email}")
+            else:
+                st.info(
+                    "Customer service email has not been configured yet. "
+                    "When you're ready, add `SULLIVAN_SUPPORT_EMAIL` to Streamlit Secrets."
+                )
+
+            st.markdown("#### Help desk")
+            st.write(
+                "Use this area for billing questions, account access, workspace issues, "
+                "bug reports, and help using Sullivan."
+            )
+            st.caption(
+                "A future Sullivan help-desk system can create support tickets directly from this page."
+            )
+
+            st.markdown("#### Useful account information")
+            st.code(
+                f"Sullivan User ID: {settings_user.get('user_code','')}\n"
+                f"Signed in with: {settings_user.get('auth_provider','email').title()}",
+                language=None
+            )
+
+        with account_tab:
+            st.markdown("### Account")
+            st.write(f"**Name:** {settings_user.get('full_name','')}")
+            st.write(f"**Email:** {settings_user.get('email','')}")
+            st.write(f"**Sullivan User ID:** {settings_user.get('user_code','')}")
+            st.write(
+                f"**Sign-in method:** {settings_user.get('auth_provider','email').title()}"
+            )
+
+            st.markdown("### Security")
+            st.caption(
+                "Billing API keys, Supabase credentials, Google authentication credentials, "
+                "and OpenAI keys stay in deployment secrets and are never displayed here."
+            )
 
 # V18.3 navigation / action clarity
 if st.session_state.get("v13_destination"):
