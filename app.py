@@ -11,7 +11,7 @@ import stripe
 import requests
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V19.4.7", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V19.4.8", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -4115,7 +4115,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.4.7</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.4.8</span></div>",unsafe_allow_html=True)
 
 
 
@@ -6864,171 +6864,227 @@ with home_tabs[0]:
                 )
             )
 
-            # V19.4.7: runtime-safe stock-style Sullivan cash chart.
-            # Previous versions were silently falling into the fallback chart when
-            # Altair hit a runtime incompatibility. This version intentionally uses
-            # a simpler, highly compatible Vega-Lite structure.
-            cash_df = forecast[["date", "Cash balance", "Money in", "Money out"]].copy()
-            cash_df = cash_df.sort_values("date")
+            # V19.4.8: aesthetic Sullivan stock-style cash outlook.
+            # Designed to visually belong to the dashboard instead of looking like
+            # a default white analytics chart.
+            cash_df = forecast[["date", "Cash balance", "Money in", "Money out"]].copy().sort_values("date")
+
+            is_dark = st.session_state.get("v19_ui_theme") == "Dark"
+            card_bg = "#102338" if is_dark else "#F8FBFF"
+            plot_bg = "#0C1B2C" if is_dark else "#F3F8FD"
+            text_main = "#F7FBFF" if is_dark else "#102A43"
+            text_muted = "#9FB4C8" if is_dark else "#6B7F93"
+            grid_color = "#27425D" if is_dark else "#DCE8F3"
+            blue = "#2F80ED"
+            blue_soft = "#65A8FF"
+            green = "#20C77A"
+            red = "#F05A67"
+            border = "#294763" if is_dark else "#DCE8F3"
 
             balance_min = float(cash_df["Cash balance"].min()) if not cash_df.empty else 0.0
             balance_max = float(cash_df["Cash balance"].max()) if not cash_df.empty else 0.0
-            span = max(balance_max - balance_min, abs(balance_max) * 0.04, 100.0)
-            pad = max(span * 0.28, 100.0)
-            y_min = balance_min - pad
-            y_max = balance_max + pad
+            balance_span = max(balance_max - balance_min, abs(balance_max) * 0.025, 60.0)
+            y_pad = max(balance_span * 0.35, 75.0)
+            y_min, y_max = balance_min - y_pad, balance_max + y_pad
 
-            is_dark = st.session_state.get("v19_ui_theme") == "Dark"
-            chart_bg = "#0D1A2A" if is_dark else "#FFFFFF"
-            axis_text = "#AFC0D0" if is_dark else "#63788C"
-            grid_color = "#28405A" if is_dark else "#E7EEF5"
-            blue = "#2F80ED"
-            green = "#27C96F"
-            red = "#F04452"
+            current_balance = float(cash_df["Cash balance"].iloc[0]) if not cash_df.empty else 0.0
+            ending_balance = float(cash_df["Cash balance"].iloc[-1]) if not cash_df.empty else 0.0
+            delta = ending_balance - current_balance
+            delta_sign = "+" if delta >= 0 else ""
+            delta_color = green if delta >= 0 else red
 
-            date_min = cash_df["date"].min()
-            date_max = cash_df["date"].max()
-
-            shared_x = alt.X(
-                "date:T",
-                title=None,
-                scale=alt.Scale(domain=[date_min, date_max]),
-                axis=alt.Axis(
-                    format="%b %d",
-                    labelColor=axis_text,
-                    labelAngle=0,
-                    labelPadding=10,
-                    tickCount=7,
-                    tickColor=grid_color,
-                    domain=False,
-                    grid=False
-                )
-            )
-
-            shared_y = alt.Y(
-                "Cash balance:Q",
-                title=None,
-                scale=alt.Scale(domain=[y_min, y_max], zero=False),
-                axis=alt.Axis(
-                    format="$,.0f",
-                    labelColor=axis_text,
-                    labelPadding=9,
-                    tickCount=5,
-                    tickColor=grid_color,
-                    domain=False,
-                    grid=True,
-                    gridColor=grid_color,
-                    gridOpacity=0.22
-                )
-            )
-
-            area = alt.Chart(cash_df).mark_area(
-                interpolate="monotone",
-                color=blue,
-                opacity=0.12
-            ).encode(
-                x=shared_x,
-                y=shared_y
-            )
-
-            line = alt.Chart(cash_df).mark_line(
-                interpolate="monotone",
-                color=blue,
-                strokeWidth=3.2
-            ).encode(
-                x=shared_x,
-                y=shared_y,
-                tooltip=[
-                    alt.Tooltip("date:T", title="Date", format="%b %d, %Y"),
-                    alt.Tooltip("Cash balance:Q", title="Projected balance", format="$,.2f"),
-                    alt.Tooltip("Money in:Q", title="Money in", format="$,.2f"),
-                    alt.Tooltip("Money out:Q", title="Money out", format="$,.2f"),
-                ]
-            )
-
-            # Small vertical event ticks give the mockup feel without introducing
-            # a second y-axis or complicated layering that can fail at runtime.
-            inflow_df = cash_df[cash_df["Money in"] > 0].copy()
-            outflow_df = cash_df[cash_df["Money out"] > 0].copy()
-
-            inflow_ticks = alt.Chart(inflow_df).mark_tick(
-                color=green,
-                thickness=5,
-                size=34,
-                opacity=0.95
-            ).encode(
-                x=shared_x,
-                y=shared_y,
-                tooltip=[
-                    alt.Tooltip("date:T", title="Date", format="%b %d, %Y"),
-                    alt.Tooltip("Money in:Q", title="Money expected in", format="$,.2f"),
-                    alt.Tooltip("Cash balance:Q", title="Projected balance", format="$,.2f"),
-                ]
-            )
-
-            outflow_ticks = alt.Chart(outflow_df).mark_tick(
-                color=red,
-                thickness=5,
-                size=34,
-                opacity=0.95
-            ).encode(
-                x=shared_x,
-                y=shared_y,
-                tooltip=[
-                    alt.Tooltip("date:T", title="Date", format="%b %d, %Y"),
-                    alt.Tooltip("Money out:Q", title="Bills expected out", format="$,.2f"),
-                    alt.Tooltip("Cash balance:Q", title="Projected balance", format="$,.2f"),
-                ]
-            )
-
-            chart = (
-                area + line + inflow_ticks + outflow_ticks
-            ).properties(
-                height=330,
-                background=chart_bg
-            ).configure_view(
-                stroke=grid_color,
-                strokeWidth=1
-            ).configure_axis(
-                labelFontSize=11
-            )
-
-            legend_bg = "#112239" if is_dark else "#F6F9FC"
-            legend_text = "#EAF2F8" if is_dark else "#31475C"
+            # Dashboard-native summary strip above the plot.
             st.markdown(
                 f"""
-                <div style="display:flex;gap:8px;flex-wrap:wrap;margin:2px 0 10px 0;">
-                    <span style="background:{legend_bg};border:1px solid {grid_color};color:{legend_text};
-                                 padding:6px 10px;border-radius:999px;font-size:.78rem;font-weight:600;">
-                        <span style="color:{blue};">◆</span>&nbsp; Projected balance
-                    </span>
-                    <span style="background:{legend_bg};border:1px solid {grid_color};color:{legend_text};
-                                 padding:6px 10px;border-radius:999px;font-size:.78rem;font-weight:600;">
-                        <span style="color:{green};">●</span>&nbsp; Money in
-                    </span>
-                    <span style="background:{legend_bg};border:1px solid {grid_color};color:{legend_text};
-                                 padding:6px 10px;border-radius:999px;font-size:.78rem;font-weight:600;">
-                        <span style="color:{red};">●</span>&nbsp; Money out
-                    </span>
+                <div style="
+                    background:{card_bg};
+                    border:1px solid {border};
+                    border-radius:22px 22px 0 0;
+                    padding:18px 22px 12px 22px;
+                    display:flex;
+                    justify-content:space-between;
+                    align-items:flex-end;
+                    gap:18px;
+                    flex-wrap:wrap;
+                ">
+                    <div>
+                        <div style="font-size:.76rem;font-weight:800;letter-spacing:.08em;
+                                    text-transform:uppercase;color:{text_muted};">
+                            Projected cash
+                        </div>
+                        <div style="font-size:2rem;line-height:1.08;font-weight:850;color:{text_main};
+                                    margin-top:5px;">
+                            ${ending_balance:,.2f}
+                        </div>
+                    </div>
+                    <div style="text-align:right;">
+                        <div style="font-size:.78rem;color:{text_muted};font-weight:650;">
+                            Next 30 days
+                        </div>
+                        <div style="font-size:1rem;color:{delta_color};font-weight:850;margin-top:3px;">
+                            {delta_sign}${delta:,.2f}
+                        </div>
+                    </div>
                 </div>
                 """,
                 unsafe_allow_html=True
             )
 
+            x_enc = alt.X(
+                "date:T",
+                title=None,
+                axis=alt.Axis(
+                    format="%b %d",
+                    labelColor=text_muted,
+                    labelAngle=0,
+                    labelPadding=12,
+                    tickCount=6,
+                    ticks=False,
+                    domain=False,
+                    grid=False,
+                    labelFontSize=11
+                )
+            )
+            y_enc = alt.Y(
+                "Cash balance:Q",
+                title=None,
+                scale=alt.Scale(domain=[y_min, y_max], zero=False),
+                axis=alt.Axis(
+                    format="$,.0f",
+                    labelColor=text_muted,
+                    labelPadding=10,
+                    tickCount=4,
+                    ticks=False,
+                    domain=False,
+                    grid=True,
+                    gridColor=grid_color,
+                    gridOpacity=0.22,
+                    labelFontSize=11
+                )
+            )
+
+            # Gradient-like depth is produced with two restrained translucent areas.
+            area_soft = alt.Chart(cash_df).mark_area(
+                interpolate="monotone",
+                color=blue_soft,
+                opacity=0.05
+            ).encode(x=x_enc, y=y_enc)
+
+            area = alt.Chart(cash_df).mark_area(
+                interpolate="monotone",
+                color=blue,
+                opacity=0.13
+            ).encode(x=x_enc, y=y_enc)
+
+            line_glow = alt.Chart(cash_df).mark_line(
+                interpolate="monotone",
+                color=blue_soft,
+                strokeWidth=7,
+                opacity=0.12,
+                strokeCap="round",
+                strokeJoin="round"
+            ).encode(x=x_enc, y=y_enc)
+
+            line = alt.Chart(cash_df).mark_line(
+                interpolate="monotone",
+                color=blue,
+                strokeWidth=3.4,
+                strokeCap="round",
+                strokeJoin="round"
+            ).encode(
+                x=x_enc,
+                y=y_enc,
+                tooltip=[
+                    alt.Tooltip("date:T", title="Date", format="%b %d, %Y"),
+                    alt.Tooltip("Cash balance:Q", title="Projected cash", format="$,.2f"),
+                    alt.Tooltip("Money in:Q", title="Money in", format="$,.2f"),
+                    alt.Tooltip("Money out:Q", title="Money out", format="$,.2f")
+                ]
+            )
+
+            # Tiny stock-chart points only appear where money actually moves.
+            event_df = cash_df[(cash_df["Money in"] > 0) | (cash_df["Money out"] > 0)].copy()
+            event_df["event_color"] = event_df.apply(
+                lambda r: green if r["Money in"] > 0 else red, axis=1
+            )
+            events = alt.Chart(event_df).mark_circle(
+                size=78,
+                stroke=plot_bg,
+                strokeWidth=2.2,
+                opacity=1
+            ).encode(
+                x=x_enc,
+                y=y_enc,
+                color=alt.Color("event_color:N", scale=None, legend=None),
+                tooltip=[
+                    alt.Tooltip("date:T", title="Date", format="%b %d, %Y"),
+                    alt.Tooltip("Cash balance:Q", title="Projected cash", format="$,.2f"),
+                    alt.Tooltip("Money in:Q", title="Money in", format="$,.2f"),
+                    alt.Tooltip("Money out:Q", title="Money out", format="$,.2f")
+                ]
+            )
+
+            # Endpoint accent gives it the cleaner brokerage/stock-app appearance.
+            endpoint_df = cash_df.tail(1)
+            endpoint_outer = alt.Chart(endpoint_df).mark_circle(
+                size=180, color=blue_soft, opacity=0.18
+            ).encode(x=x_enc, y=y_enc)
+            endpoint = alt.Chart(endpoint_df).mark_circle(
+                size=72, color=blue, stroke=plot_bg, strokeWidth=2
+            ).encode(x=x_enc, y=y_enc)
+
+            chart = (
+                area_soft + area + line_glow + line + events + endpoint_outer + endpoint
+            ).properties(
+                height=275,
+                background=plot_bg,
+                padding={"left": 8, "right": 16, "top": 18, "bottom": 8}
+            ).configure_view(
+                stroke=None,
+                fill=plot_bg
+            )
+
+            # CSS wrapper rounds the actual chart region and removes the sharp,
+            # white dashboard-break appearance.
+            st.markdown(
+                f"""
+                <style>
+                div[data-testid="stVegaLiteChart"] {{
+                    background:{plot_bg} !important;
+                    border:1px solid {border} !important;
+                    border-top:none !important;
+                    border-radius:0 0 22px 22px !important;
+                    overflow:hidden !important;
+                    padding:4px 12px 8px 8px !important;
+                    margin-top:-1px !important;
+                    box-shadow:0 10px 30px rgba(15,42,67,.06);
+                }}
+                div[data-testid="stVegaLiteChart"] > div {{
+                    border-radius:0 0 22px 22px !important;
+                    overflow:hidden !important;
+                }}
+                </style>
+                """,
+                unsafe_allow_html=True
+            )
+
             st.altair_chart(chart, width="stretch")
-            st.caption(
-                "Estimated 30-day outlook based on your current balance, scheduled invoices, "
-                "and upcoming bills. Hover over the blue line or event markers for exact values."
+
+            st.markdown(
+                f"""
+                <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;
+                            margin:10px 4px 2px 4px;color:{text_muted};font-size:.77rem;">
+                    <span><b style="color:{blue};">●</b>&nbsp; Projected balance</span>
+                    <span><b style="color:{green};">●</b>&nbsp; Cash in</span>
+                    <span><b style="color:{red};">●</b>&nbsp; Cash out</span>
+                    <span style="margin-left:auto;">Hover for exact values</span>
+                </div>
+                """,
+                unsafe_allow_html=True
             )
         except Exception as chart_error:
-            # Do not silently hide chart errors anymore; keep a functional fallback
-            # while making the actual problem visible in Streamlit logs.
-            print(f"V19.4.7 cash outlook chart error: {type(chart_error).__name__}: {chart_error}")
-            st.line_chart(
-                forecast.set_index("date")[["Cash balance"]],
-                height=300,
-                width="stretch"
-            )
+            print(f"V19.4.8 cash outlook chart error: {type(chart_error).__name__}: {chart_error}")
+            st.error("The enhanced cash outlook could not render. Check the Streamlit log for the chart error.")
 
         projected=float(forecast["Cash balance"].iloc[-1]) if not forecast.empty else m["bank"]
         x,y,z=st.columns(3)
