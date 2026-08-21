@@ -11,7 +11,7 @@ import stripe
 import requests
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V19.2.1", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V19.3", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -176,10 +176,161 @@ class Resolution(BaseModel):
     counterparty_name: Optional[str] = None
     counterparty_type: Optional[str] = None
 
+# V19.3 workspace isolation.
+#
+# Authentication, memberships, billing and AI allowance tables remain shared.
+# Every bookkeeping/accounting table is transparently routed to a physical
+# workspace-specific table. This means Personal, Company A and Company B
+# genuinely have separate books even though Sullivan still uses one SQLite file.
+WORKSPACE_ACCOUNTING_TABLES = (
+    "business_profile",
+    "accounts",
+    "counterparties",
+    "transactions",
+    "learned_rules",
+    "journal_entries",
+    "audit_log",
+    "close_periods",
+    "invoices",
+    "bills",
+    "manual_journals",
+    "manual_journal_lines",
+    "documents",
+    "customers",
+    "vendors",
+    "invoice_payments",
+    "bill_payments",
+    "bank_reconciliations",
+    "bank_reconciliation_items",
+    "estimates",
+    "estimate_lines",
+    "invoice_lines",
+    "bill_lines",
+    "credit_notes",
+    "purchase_orders",
+    "purchase_order_lines",
+    "recurring_invoices",
+    "accounting_periods",
+)
+
+SHARED_SULLIVAN_TABLES = (
+    "companies",
+    "app_users",
+    "company_members",
+    "company_invites",
+    "ai_usage",
+    "ai_demo_results",
+    "enterprise_quotes",
+    "workspace_migrations",
+)
+
+
+def _workspace_storage_key():
+    """
+    Return the currently active bookkeeping workspace key.
+
+    Company books:  c<company_id>
+    Personal books: u<user_id>
+
+    During startup before authentication is established, return None so schema
+    bootstrap/migrations continue to operate on the legacy base tables.
+    """
+    try:
+        company = st.session_state.get("auth_company")
+        user = st.session_state.get("auth_user")
+        role = st.session_state.get("auth_role")
+
+        if company and int(company.get("company_id", 0) or 0) > 0:
+            return f"c{int(company['company_id'])}"
+
+        if user and role == "Personal":
+            return f"u{int(user['id'])}"
+    except Exception:
+        pass
+
+    return None
+
+
+def _workspace_table_name(table_name, workspace_key=None):
+    key = workspace_key if workspace_key is not None else _workspace_storage_key()
+    if not key:
+        return table_name
+    return f"ws_{key}__{table_name}"
+
+
+def _scope_sql(sql):
+    """
+    Rewrite bookkeeping table names to the active workspace's physical tables.
+
+    Shared identity/billing tables are intentionally never rewritten.
+    """
+    key = _workspace_storage_key()
+    if not key or not isinstance(sql, str):
+        return sql
+
+    scoped = sql
+
+    # Longer names first prevents a short table name from touching a longer one.
+    for table in sorted(WORKSPACE_ACCOUNTING_TABLES, key=len, reverse=True):
+        physical = _workspace_table_name(table, key)
+        scoped = re.sub(
+            rf'(?<![A-Za-z0-9_]){re.escape(table)}(?![A-Za-z0-9_])',
+            physical,
+            scoped,
+        )
+
+    return scoped
+
+
+class WorkspaceCursor(sqlite3.Cursor):
+    def execute(self, sql, parameters=()):
+        return super().execute(_scope_sql(sql), parameters)
+
+    def executemany(self, sql, seq_of_parameters):
+        return super().executemany(_scope_sql(sql), seq_of_parameters)
+
+    def executescript(self, sql_script):
+        return super().executescript(_scope_sql(sql_script))
+
+
+class WorkspaceConnection(sqlite3.Connection):
+    def cursor(self, factory=None):
+        return super().cursor(factory or WorkspaceCursor)
+
+    def execute(self, sql, parameters=()):
+        cur = self.cursor()
+        return cur.execute(sql, parameters)
+
+    def executemany(self, sql, seq_of_parameters):
+        cur = self.cursor()
+        return cur.executemany(sql, seq_of_parameters)
+
+    def executescript(self, sql_script):
+        cur = self.cursor()
+        return cur.executescript(sql_script)
+
+
+def raw_connect():
+    """Open Sullivan's SQLite database without workspace SQL rewriting."""
+    c = sqlite3.connect(DB_PATH, timeout=15, isolation_level=None)
+    c.execute("PRAGMA journal_mode=WAL;")
+    c.execute("PRAGMA synchronous=NORMAL;")
+    c.execute("PRAGMA busy_timeout=15000;")
+    c.execute("PRAGMA foreign_keys=ON;")
+    return c
+
+
 def connect():
-    c=sqlite3.connect(DB_PATH,timeout=15,isolation_level=None)
-    c.execute("PRAGMA journal_mode=WAL;"); c.execute("PRAGMA synchronous=NORMAL;")
-    c.execute("PRAGMA busy_timeout=15000;"); c.execute("PRAGMA foreign_keys=ON;")
+    c = sqlite3.connect(
+        DB_PATH,
+        timeout=15,
+        isolation_level=None,
+        factory=WorkspaceConnection,
+    )
+    c.execute("PRAGMA journal_mode=WAL;")
+    c.execute("PRAGMA synchronous=NORMAL;")
+    c.execute("PRAGMA busy_timeout=15000;")
+    c.execute("PRAGMA foreign_keys=ON;")
     return c
 
 def write(fn):
@@ -2583,6 +2734,12 @@ def v17_init_auth_tables():
             used_by_user_id INTEGER,
             used_at TEXT
         )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS workspace_migrations(
+            migration_key TEXT PRIMARY KEY,
+            workspace_key TEXT,
+            created_at TEXT NOT NULL,
+            details TEXT
+        )""")
         # V18.3 migrations for Google/OIDC identities.
         user_cols = [r[1] for r in c.execute("PRAGMA table_info(app_users)").fetchall()]
         if "auth_provider" not in user_cols:
@@ -2821,12 +2978,14 @@ def activate_workspace(user, company_row=None, persist=True):
         st.session_state["auth_role"] = "Personal"
         if persist:
             save_workspace_preference(user["id"], None)
+        ensure_current_workspace_books()
         return
 
     st.session_state["auth_company"] = _workspace_company_dict(company_row)
     st.session_state["auth_role"] = str(company_row.role)
     if persist:
         save_workspace_preference(user["id"], int(company_row.company_id))
+    ensure_current_workspace_books()
 
 
 def load_default_workspace_for_user(user):
@@ -2927,6 +3086,218 @@ def company_memberships(user_id):
                   JOIN companies c ON c.id=m.company_id
                   WHERE m.user_id=? AND m.status='Active' AND c.status='Active'
                   ORDER BY c.company_name""",(int(user_id),))
+
+
+def _raw_table_exists(c, table_name):
+    return bool(
+        c.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+            (str(table_name),),
+        ).fetchone()
+    )
+
+
+def _legacy_books_have_data(c):
+    """
+    Only migrate legacy books when they contain meaningful user bookkeeping data.
+    Default chart-of-account seed rows alone do not count.
+    """
+    probes = (
+        "transactions",
+        "journal_entries",
+        "invoices",
+        "bills",
+        "customers",
+        "vendors",
+        "manual_journals",
+        "estimates",
+        "purchase_orders",
+        "documents",
+    )
+    for table in probes:
+        if _raw_table_exists(c, table):
+            try:
+                n = int(c.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+                if n > 0:
+                    return True
+            except Exception:
+                pass
+
+    # A customized business profile also counts as legacy business data.
+    if _raw_table_exists(c, "business_profile"):
+        try:
+            row = c.execute(
+                """SELECT business_name,industry,gst_registered,qst_registered
+                   FROM business_profile WHERE id=1"""
+            ).fetchone()
+            if row and (
+                str(row[0] or "").strip()
+                or str(row[1] or "").strip()
+                or int(row[2] or 0)
+                or int(row[3] or 0)
+            ):
+                return True
+        except Exception:
+            pass
+
+    return False
+
+
+def ensure_current_workspace_books():
+    """
+    Initialize the active workspace's accounting schema and perform the one-time
+    V19.3 migration of pre-workspace Sullivan books.
+
+    Legacy accounting data is migrated only into a COMPANY workspace, never into
+    Personal. That makes Personal start as a genuinely separate clean account.
+    """
+    workspace_key = _workspace_storage_key()
+    if not workspace_key:
+        return
+
+    # Running init_db() while a workspace is active causes every accounting-table
+    # CREATE/ALTER/seed statement to be transparently rewritten to that workspace.
+    init_db()
+
+    # Legacy migration applies once per Sullivan deployment.
+    c = raw_connect()
+    try:
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS workspace_migrations(
+                migration_key TEXT PRIMARY KEY,
+                workspace_key TEXT,
+                created_at TEXT NOT NULL,
+                details TEXT
+            )"""
+        )
+
+        done = c.execute(
+            "SELECT workspace_key FROM workspace_migrations WHERE migration_key='v19_3_legacy_books'"
+        ).fetchone()
+
+        # Do not move old shared bookkeeping into Personal. Wait until the user is
+        # inside a company workspace, which is where pre-V19 company books belonged.
+        is_company = workspace_key.startswith("c")
+
+        if not done and is_company and _legacy_books_have_data(c):
+            for table in WORKSPACE_ACCOUNTING_TABLES:
+                source = table
+                target = _workspace_table_name(table, workspace_key)
+
+                if not _raw_table_exists(c, source) or not _raw_table_exists(c, target):
+                    continue
+
+                # The scoped schema has already been created by init_db().
+                # Replace its seed/default rows with the exact legacy data.
+                c.execute("BEGIN IMMEDIATE")
+                try:
+                    c.execute(f'DELETE FROM "{target}"')
+                    c.execute(
+                        f'INSERT INTO "{target}" SELECT * FROM "{source}"'
+                    )
+                    c.execute("COMMIT")
+                except Exception:
+                    c.execute("ROLLBACK")
+                    raise
+
+            c.execute(
+                """INSERT OR REPLACE INTO workspace_migrations(
+                       migration_key,workspace_key,created_at,details
+                   ) VALUES('v19_3_legacy_books',?,?,?)""",
+                (
+                    workspace_key,
+                    datetime.now().isoformat(timespec="seconds"),
+                    "Pre-V19 accounting data moved into the first confirmed company workspace.",
+                ),
+            )
+    finally:
+        c.close()
+
+
+def delete_company_workspace(user_id, company_id, confirmation_name):
+    """
+    Permanently delete an accidental/unneeded company workspace.
+
+    Safety:
+      • Owner only.
+      • Exact company-name confirmation required.
+      • Active paid Stripe-backed companies cannot be deleted here.
+    """
+    uid = int(user_id)
+    cid = int(company_id)
+    confirmation_name = str(confirmation_name or "").strip()
+
+    c = raw_connect()
+    try:
+        company = c.execute(
+            """SELECT company_name,subscription_plan,subscription_status,
+                      stripe_customer_id,stripe_subscription_id
+               FROM companies WHERE id=?""",
+            (cid,),
+        ).fetchone()
+
+        if not company:
+            raise ValueError("Company workspace not found.")
+
+        company_name, plan, sub_status, stripe_customer, stripe_subscription = company
+
+        owner = c.execute(
+            """SELECT 1 FROM company_members
+               WHERE company_id=? AND user_id=? AND role='Owner' AND status='Active'
+               LIMIT 1""",
+            (cid, uid),
+        ).fetchone()
+
+        if not owner:
+            raise ValueError("Only a company Owner can delete this workspace.")
+
+        if confirmation_name != str(company_name):
+            raise ValueError("Type the company name exactly to confirm deletion.")
+
+        paid_or_stripe_backed = (
+            str(plan or "Trial") != "Trial"
+            or bool(str(stripe_customer or "").strip())
+            or bool(str(stripe_subscription or "").strip())
+            or str(sub_status or "").lower() in ("active", "trialing", "past_due")
+        )
+
+        if paid_or_stripe_backed:
+            raise ValueError(
+                "This company has billing/subscription history. Cancel the Stripe "
+                "subscription first, then delete the workspace after it is no longer active."
+            )
+
+        workspace_key = f"c{cid}"
+
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            # Drop only this company's physical bookkeeping tables.
+            for table in WORKSPACE_ACCOUNTING_TABLES:
+                physical = _workspace_table_name(table, workspace_key)
+                c.execute(f'DROP TABLE IF EXISTS "{physical}"')
+
+            c.execute("DELETE FROM company_invites WHERE company_id=?", (cid,))
+            c.execute("DELETE FROM ai_usage WHERE company_id=?", (cid,))
+            c.execute("DELETE FROM ai_demo_results WHERE company_id=?", (cid,))
+            c.execute("DELETE FROM enterprise_quotes WHERE company_id=?", (cid,))
+            c.execute("DELETE FROM company_members WHERE company_id=?", (cid,))
+            c.execute("DELETE FROM companies WHERE id=?", (cid,))
+            c.execute(
+                """UPDATE app_users
+                   SET last_workspace_mode='Personal',
+                       last_workspace_company_id=NULL
+                   WHERE last_workspace_company_id=?""",
+                (cid,),
+            )
+            c.execute("COMMIT")
+        except Exception:
+            c.execute("ROLLBACK")
+            raise
+
+    finally:
+        c.close()
+
+    return str(company_name)
 
 def create_company_invite(company_id,creator_user_id,role="Employee",email=""):
     role=role if role in ("Owner","Accountant","Manager","Employee") else "Employee"
@@ -3649,7 +4020,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.2.1</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.3</span></div>",unsafe_allow_html=True)
 
 
 
@@ -3690,6 +4061,14 @@ if _streamlit_oidc_logged_in():
             st.session_state["v171_auth_reason"] = ""
     except Exception as e:
         st.error(f"Google sign-in reached Sullivan, but the account could not be loaded: {e}")
+
+# V19.3: after authentication/workspace restoration, make sure this workspace
+# owns a separate set of accounting tables before any business screens render.
+if st.session_state.get("auth_user") and st.session_state.get("auth_role") != "Guest":
+    try:
+        ensure_current_workspace_books()
+    except Exception as e:
+        st.error(f"Sullivan could not initialize this workspace's separate books: {e}")
 
 def v171_is_signed_in():
     return bool(st.session_state.get("auth_user"))
@@ -4045,7 +4424,52 @@ with st.sidebar:
                     except Exception as e:
                         st.error(str(e))
 
-            st.caption("Personal = your own account. Company workspaces control team membership and roles.")
+            # V19.3 company deletion. Only the active company's Owner sees it.
+            active_company = current_company()
+            active_role = st.session_state.get("auth_role")
+            if active_company and active_role == "Owner":
+                with st.expander("Delete company"):
+                    delete_name = str(active_company.get("company_name") or "")
+                    st.warning(
+                        "Deleting a company permanently removes that company's Sullivan "
+                        "workspace and bookkeeping data. This cannot be undone."
+                    )
+                    st.caption(
+                        "Paid/Stripe-backed companies must have billing cancelled before deletion."
+                    )
+                    typed_delete_name = st.text_input(
+                        f'Type "{delete_name}" to confirm',
+                        key="v19_delete_company_confirm_name"
+                    )
+                    if st.button(
+                        "Delete this company permanently",
+                        use_container_width=True,
+                        key="v19_delete_company_btn"
+                    ):
+                        try:
+                            deleted_name = delete_company_workspace(
+                                auth_u["id"],
+                                int(active_company["company_id"]),
+                                typed_delete_name,
+                            )
+                            activate_workspace(auth_u, None, persist=True)
+                            st.session_state["v19_workspace_select_reset"] = "Personal"
+                            st.session_state["v19_workspace_pending_label"] = None
+                            st.session_state["v19_workspace_pending_company_id"] = None
+                            st.session_state["v19_workspace_pending_role"] = None
+                            st.session_state["v19_company_deleted"] = deleted_name
+                            st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
+
+            if st.session_state.get("v19_company_deleted"):
+                deleted_name = st.session_state.pop("v19_company_deleted")
+                st.success(f'Deleted company workspace **{deleted_name}**.')
+
+            st.caption(
+                "Personal and company workspaces have completely separate books, transactions, "
+                "reports, customers, vendors, taxes, documents, and accounting history."
+            )
             st.markdown('</div>', unsafe_allow_html=True)
         if st.button("Sign out",use_container_width=True,key="v171_sidebar_signout"):
             provider = (auth_u or {}).get("auth_provider","email")
