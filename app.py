@@ -13,7 +13,7 @@ import stripe
 import requests
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V20.1", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V20.2", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -4186,7 +4186,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V20.1</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V20.2</span></div>",unsafe_allow_html=True)
 
 
 
@@ -6785,6 +6785,443 @@ def v201_render_assets_equity():
                     st.success("Ownership activity recorded.")
                     st.rerun()
 
+
+# ============================================================
+# V20.2 — BUSINESS INTELLIGENCE
+# ============================================================
+def v202_safe_sum(df, column, mask=None):
+    if df is None or df.empty or column not in df.columns:
+        return 0.0
+    series = pd.to_numeric(df[column], errors="coerce").fillna(0.0)
+    if mask is not None:
+        try:
+            series = series[mask]
+        except Exception:
+            return 0.0
+    return float(series.sum())
+
+
+def v202_business_snapshot():
+    """
+    Build a workspace-specific operating snapshot from Sullivan's existing books.
+    No AI is required; these are deterministic business metrics.
+    """
+    today = pd.Timestamp(date.today())
+    month_start = today.replace(day=1)
+    prior_month_end = month_start - pd.Timedelta(days=1)
+    prior_month_start = prior_month_end.replace(day=1)
+
+    tx = trans().copy()
+    if not tx.empty:
+        tx["date_dt"] = pd.to_datetime(tx["date"], errors="coerce")
+        tx["amount_num"] = pd.to_numeric(tx["amount"], errors="coerce").fillna(0.0)
+        tx = tx.dropna(subset=["date_dt"])
+    else:
+        tx = pd.DataFrame(columns=["date_dt","amount_num","category","description"])
+
+    this_month = tx[(tx["date_dt"] >= month_start) & (tx["date_dt"] <= today)] if not tx.empty else tx
+    prior_month = tx[
+        (tx["date_dt"] >= prior_month_start) &
+        (tx["date_dt"] <= prior_month_end)
+    ] if not tx.empty else tx
+
+    revenue = float(this_month.loc[this_month["amount_num"] > 0, "amount_num"].sum()) if not this_month.empty else 0.0
+    expenses = abs(float(this_month.loc[this_month["amount_num"] < 0, "amount_num"].sum())) if not this_month.empty else 0.0
+    profit = revenue - expenses
+
+    prior_revenue = float(prior_month.loc[prior_month["amount_num"] > 0, "amount_num"].sum()) if not prior_month.empty else 0.0
+    prior_expenses = abs(float(prior_month.loc[prior_month["amount_num"] < 0, "amount_num"].sum())) if not prior_month.empty else 0.0
+    prior_profit = prior_revenue - prior_expenses
+
+    invoices = read("SELECT * FROM invoices")
+    bills = read("SELECT * FROM bills")
+
+    ar_open = 0.0
+    ar_overdue = 0.0
+    if not invoices.empty:
+        invoices["total_num"] = pd.to_numeric(invoices.get("total", 0), errors="coerce").fillna(0.0)
+        invoices["paid_num"] = pd.to_numeric(invoices.get("paid_amount", 0), errors="coerce").fillna(0.0)
+        invoices["open_num"] = (invoices["total_num"] - invoices["paid_num"]).clip(lower=0)
+        ar_open = float(invoices["open_num"].sum())
+        if "due_date" in invoices.columns:
+            due = pd.to_datetime(invoices["due_date"], errors="coerce")
+            ar_overdue = float(invoices.loc[(due < today) & (invoices["open_num"] > 0), "open_num"].sum())
+
+    ap_open = 0.0
+    ap_overdue = 0.0
+    if not bills.empty:
+        bills["total_num"] = pd.to_numeric(bills.get("total", 0), errors="coerce").fillna(0.0)
+        bills["paid_num"] = pd.to_numeric(bills.get("paid_amount", 0), errors="coerce").fillna(0.0)
+        bills["open_num"] = (bills["total_num"] - bills["paid_num"]).clip(lower=0)
+        ap_open = float(bills["open_num"].sum())
+        if "due_date" in bills.columns:
+            due = pd.to_datetime(bills["due_date"], errors="coerce")
+            ap_overdue = float(bills.loc[(due < today) & (bills["open_num"] > 0), "open_num"].sum())
+
+    fin = v20_finance_summary()
+
+    assets = read("SELECT * FROM business_assets")
+    asset_book = 0.0
+    if not assets.empty:
+        for _, row in assets.iterrows():
+            if str(row.get("status","Active")) != "Disposed":
+                bv, _ = v201_asset_book_value(row)
+                asset_book += float(bv or 0)
+
+    # Current cash follows Sullivan's existing home metric.
+    try:
+        cash = float(m["bank"])
+    except Exception:
+        try:
+            cash = float(metrics()["bank"])
+        except Exception:
+            cash = 0.0
+
+    # Basic expense concentration for insights.
+    top_expense_category = None
+    top_expense_amount = 0.0
+    if not this_month.empty and "category" in this_month.columns:
+        exp = this_month[this_month["amount_num"] < 0].copy()
+        if not exp.empty:
+            grouped = exp.groupby(exp["category"].fillna("Uncategorized"))["amount_num"].sum().abs().sort_values(ascending=False)
+            if not grouped.empty:
+                top_expense_category = str(grouped.index[0])
+                top_expense_amount = float(grouped.iloc[0])
+
+    def pct_change(current, previous):
+        if abs(previous) < 0.01:
+            return None if abs(current) < 0.01 else 100.0
+        return ((current - previous) / abs(previous)) * 100.0
+
+    revenue_change = pct_change(revenue, prior_revenue)
+    expense_change = pct_change(expenses, prior_expenses)
+    profit_change = pct_change(profit, prior_profit)
+
+    # Transparent health score — not a credit score, accounting opinion, or valuation.
+    score = 50
+    reasons = []
+
+    if profit > 0:
+        score += 15
+        reasons.append(("positive", "The business is profitable this month."))
+    elif revenue > 0:
+        score -= 10
+        reasons.append(("warning", "Expenses currently exceed revenue this month."))
+
+    if cash > 0:
+        score += 10
+    else:
+        score -= 15
+        reasons.append(("warning", "Recorded cash balance is at or below zero."))
+
+    if revenue_change is not None:
+        if revenue_change > 5:
+            score += 8
+        elif revenue_change < -10:
+            score -= 8
+
+    if ar_open > 0:
+        overdue_ratio = ar_overdue / ar_open if ar_open else 0
+        if overdue_ratio > 0.35:
+            score -= 10
+            reasons.append(("warning", "A large share of customer receivables is overdue."))
+        elif overdue_ratio < 0.10:
+            score += 4
+
+    if fin["total_debt"] > 0:
+        debt_to_assets = fin["total_debt"] / asset_book if asset_book > 0 else None
+        if debt_to_assets is not None and debt_to_assets > 0.8:
+            score -= 8
+            reasons.append(("warning", "Tracked debt is high relative to tracked asset book value."))
+        elif debt_to_assets is not None and debt_to_assets < 0.5:
+            score += 4
+
+    score = max(0, min(100, int(round(score))))
+
+    # Six-month monthly trend.
+    trend_rows = []
+    for offset in range(5, -1, -1):
+        period_start = (month_start - pd.DateOffset(months=offset)).normalize()
+        period_end = (period_start + pd.offsets.MonthEnd(1)).normalize()
+        frame = tx[(tx["date_dt"] >= period_start) & (tx["date_dt"] <= period_end)] if not tx.empty else tx
+        rev = float(frame.loc[frame["amount_num"] > 0, "amount_num"].sum()) if not frame.empty else 0.0
+        exp = abs(float(frame.loc[frame["amount_num"] < 0, "amount_num"].sum())) if not frame.empty else 0.0
+        trend_rows.append({
+            "Month": period_start.strftime("%b %Y"),
+            "Revenue": round(rev, 2),
+            "Expenses": round(exp, 2),
+            "Profit": round(rev-exp, 2),
+        })
+    trend = pd.DataFrame(trend_rows)
+
+    return {
+        "revenue": revenue,
+        "expenses": expenses,
+        "profit": profit,
+        "cash": cash,
+        "prior_revenue": prior_revenue,
+        "prior_expenses": prior_expenses,
+        "prior_profit": prior_profit,
+        "revenue_change": revenue_change,
+        "expense_change": expense_change,
+        "profit_change": profit_change,
+        "ar_open": ar_open,
+        "ar_overdue": ar_overdue,
+        "ap_open": ap_open,
+        "ap_overdue": ap_overdue,
+        "total_debt": float(fin["total_debt"]),
+        "monthly_debt_service": float(fin["monthly_debt_service"]),
+        "interest_ytd": float(fin["interest_ytd"]),
+        "asset_book": float(asset_book),
+        "top_expense_category": top_expense_category,
+        "top_expense_amount": top_expense_amount,
+        "health_score": score,
+        "health_reasons": reasons,
+        "trend": trend,
+    }
+
+
+def v202_delta_label(value):
+    if value is None:
+        return "New activity"
+    sign = "+" if value >= 0 else ""
+    return f"{sign}{value:.1f}% vs last month"
+
+
+def v202_build_insights(snapshot):
+    insights = []
+
+    rc = snapshot["revenue_change"]
+    ec = snapshot["expense_change"]
+    pc = snapshot["profit_change"]
+
+    if rc is not None and rc >= 10:
+        insights.append(("good", "Revenue momentum", f"Revenue is up {rc:.1f}% compared with last month."))
+    elif rc is not None and rc <= -10:
+        insights.append(("risk", "Revenue slowdown", f"Revenue is down {abs(rc):.1f}% compared with last month."))
+
+    if ec is not None and rc is not None and ec > rc + 8 and snapshot["expenses"] > 0:
+        insights.append(("watch", "Expenses are growing faster", f"Expenses changed {ec:.1f}% while revenue changed {rc:.1f}%."))
+
+    if snapshot["profit"] > 0:
+        margin = snapshot["profit"] / snapshot["revenue"] * 100 if snapshot["revenue"] else 0
+        insights.append(("good", "Current profit margin", f"This month's recorded margin is approximately {margin:.1f}%."))
+
+    if snapshot["ar_overdue"] > 0:
+        insights.append(("risk", "Overdue customer money", f"{v20_money(snapshot['ar_overdue'])} of customer receivables is overdue."))
+
+    if snapshot["ap_overdue"] > 0:
+        insights.append(("risk", "Overdue bills", f"{v20_money(snapshot['ap_overdue'])} of tracked bills is overdue."))
+
+    if snapshot["total_debt"] > 0:
+        insights.append(("info", "Debt obligations", f"Sullivan is tracking {v20_money(snapshot['total_debt'])} of debt with about {v20_money(snapshot['monthly_debt_service'])} in normalized monthly debt service."))
+
+    if snapshot["top_expense_category"] and snapshot["top_expense_amount"] > 0:
+        insights.append(("info", "Largest expense area", f"{snapshot['top_expense_category']} is the largest recorded expense category this month at {v20_money(snapshot['top_expense_amount'])}."))
+
+    if not insights:
+        insights.append(("info", "More data needed", "As more transactions, invoices, bills, assets, and financing are recorded, Sullivan will surface stronger business insights here."))
+
+    return insights[:6]
+
+
+def v202_render_business_intelligence():
+    st.subheader("Business Intelligence")
+    st.caption(
+        "A management view of revenue, profit, cash, receivables, debt, and assets — built from this workspace's Sullivan records."
+    )
+
+    if not v171_is_signed_in():
+        st.info("Sign in to view business intelligence for your workspace.")
+        return
+
+    s = v202_business_snapshot()
+    is_dark = st.session_state.get("v19_ui_theme") == "Dark"
+
+    card_bg = "#102338" if is_dark else "#FFFFFF"
+    soft_bg = "#0C1B2C" if is_dark else "#F6FAFD"
+    border = "#294763" if is_dark else "#DCE8F2"
+    text_main = "#F7FBFF" if is_dark else "#102A43"
+    text_muted = "#9FB4C8" if is_dark else "#6F8295"
+
+    # Health score hero
+    score = s["health_score"]
+    if score >= 80:
+        score_label, score_color = "Strong", "#22C879"
+    elif score >= 65:
+        score_label, score_color = "Healthy", "#2F80ED"
+    elif score >= 45:
+        score_label, score_color = "Watch", "#F4A11A"
+    else:
+        score_label, score_color = "Needs attention", "#F25563"
+
+    st.markdown(
+        f"""
+        <div style="
+            background:{card_bg};
+            border:1px solid {border};
+            border-radius:24px;
+            padding:22px 24px;
+            margin:4px 0 16px 0;
+            display:flex;
+            justify-content:space-between;
+            gap:24px;
+            align-items:center;
+            flex-wrap:wrap;
+        ">
+            <div>
+                <div style="color:{text_muted};font-size:.75rem;font-weight:800;letter-spacing:.09em;text-transform:uppercase;">
+                    Sullivan business health
+                </div>
+                <div style="color:{text_main};font-size:1.55rem;font-weight:850;margin-top:5px;">
+                    {score_label}
+                </div>
+                <div style="color:{text_muted};font-size:.86rem;margin-top:4px;">
+                    A management indicator based only on data currently recorded in Sullivan.
+                </div>
+            </div>
+            <div style="
+                width:112px;height:112px;border-radius:999px;
+                display:flex;align-items:center;justify-content:center;flex-direction:column;
+                background:{soft_bg};border:8px solid {score_color};
+            ">
+                <div style="color:{text_main};font-size:1.9rem;font-weight:900;line-height:1;">{score}</div>
+                <div style="color:{text_muted};font-size:.72rem;font-weight:700;margin-top:4px;">/ 100</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # KPI row
+    k1,k2,k3,k4 = st.columns(4)
+    k1.metric("Revenue this month", v20_money(s["revenue"]), v202_delta_label(s["revenue_change"]))
+    k2.metric("Profit this month", v20_money(s["profit"]), v202_delta_label(s["profit_change"]))
+    k3.metric("Cash", v20_money(s["cash"]))
+    k4.metric("Customer money owed", v20_money(s["ar_open"]))
+
+    k5,k6,k7,k8 = st.columns(4)
+    k5.metric("Bills owed", v20_money(s["ap_open"]))
+    k6.metric("Total tracked debt", v20_money(s["total_debt"]))
+    k7.metric("Asset book value", v20_money(s["asset_book"]))
+    k8.metric("Interest YTD", v20_money(s["interest_ytd"]))
+
+    overview_tab, trends_tab, attention_tab = st.tabs([
+        "Executive Overview","Trends","What Needs Attention"
+    ])
+
+    with overview_tab:
+        left,right = st.columns([1.25,1])
+
+        with left:
+            st.markdown("### Sullivan Insights")
+            insights = v202_build_insights(s)
+            icon_map = {"good":"🟢","watch":"🟡","risk":"🔴","info":"🔵"}
+            for kind,title,body in insights:
+                st.markdown(
+                    f"""
+                    <div style="
+                        background:{card_bg};border:1px solid {border};border-radius:17px;
+                        padding:14px 16px;margin:0 0 10px 0;
+                    ">
+                        <div style="color:{text_main};font-weight:800;">
+                            {icon_map.get(kind,"🔵")} {title}
+                        </div>
+                        <div style="color:{text_muted};font-size:.86rem;line-height:1.45;margin-top:4px;">
+                            {body}
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+        with right:
+            st.markdown("### Financial position")
+            position = pd.DataFrame({
+                "Area":["Cash","Receivables","Assets","Debt","Bills"],
+                "Amount":[
+                    max(s["cash"],0),
+                    s["ar_open"],
+                    s["asset_book"],
+                    s["total_debt"],
+                    s["ap_open"],
+                ]
+            }).set_index("Area")
+            st.bar_chart(position, height=310, width="stretch")
+            st.caption("A simple comparison of major recorded financial positions. This is not a valuation.")
+
+            if s["total_debt"] > 0 and s["asset_book"] > 0:
+                st.metric(
+                    "Tracked debt / asset book value",
+                    f"{(s['total_debt']/s['asset_book'])*100:.1f}%"
+                )
+
+    with trends_tab:
+        st.markdown("### Six-month operating trend")
+        trend = s["trend"].copy()
+
+        if trend.empty:
+            st.info("Not enough transaction history to build a trend yet.")
+        else:
+            st.line_chart(
+                trend.set_index("Month")[["Revenue","Expenses","Profit"]],
+                height=330,
+                width="stretch"
+            )
+            st.dataframe(
+                trend,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "Revenue":st.column_config.NumberColumn(format="$%.2f"),
+                    "Expenses":st.column_config.NumberColumn(format="$%.2f"),
+                    "Profit":st.column_config.NumberColumn(format="$%.2f"),
+                }
+            )
+
+    with attention_tab:
+        st.markdown("### Priority checks")
+
+        priority_rows = [
+            {
+                "Area":"Overdue receivables",
+                "Amount":s["ar_overdue"],
+                "Status":"Needs attention" if s["ar_overdue"] > 0 else "Clear",
+                "Action":"Review Money In → Invoices / Statements" if s["ar_overdue"] > 0 else "No overdue customer balances detected",
+            },
+            {
+                "Area":"Overdue bills",
+                "Amount":s["ap_overdue"],
+                "Status":"Needs attention" if s["ap_overdue"] > 0 else "Clear",
+                "Action":"Review Money Out → Bills" if s["ap_overdue"] > 0 else "No overdue bills detected",
+            },
+            {
+                "Area":"Debt service",
+                "Amount":s["monthly_debt_service"],
+                "Status":"Tracked" if s["total_debt"] > 0 else "None",
+                "Action":"Review Finance → Debt & Financing",
+            },
+        ]
+        st.dataframe(
+            pd.DataFrame(priority_rows),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Amount":st.column_config.NumberColumn(format="$%.2f"),
+            }
+        )
+
+        if s["health_reasons"]:
+            st.markdown("### Health score factors")
+            for kind, reason in s["health_reasons"]:
+                icon = "✓" if kind == "positive" else "!"
+                st.write(f"**{icon}** {reason}")
+
+        st.caption(
+            "The Sullivan Business Health score is an internal management indicator, not a credit score, valuation, audit opinion, or professional financial advice."
+        )
+
+
 def v20_render_finance():
     st.subheader("Business Finance")
     st.caption(
@@ -7550,7 +7987,7 @@ with st.sidebar:
         "Support questions do not use your normal AI points."
     )
 
-main_sections=st.tabs(["Home","Money In","Money Out","Bank","Taxes","Reports","Finance","Team","Plan & AI","Advanced","Settings"])
+main_sections=st.tabs(["Home","Money In","Money Out","Bank","Taxes","Reports","Insights","Finance","Team","Plan & AI","Advanced","Settings"])
 
 
 with main_sections[0]:
@@ -7566,13 +8003,16 @@ with main_sections[4]:
 with main_sections[5]:
     report_tabs=st.tabs(["Financial Reports","Money Owed / Bills Owed"])
 with main_sections[6]:
+    v202_render_business_intelligence()
+
+with main_sections[7]:
     finance_sections=st.tabs(["Debt & Financing","Assets & Equity"])
     with finance_sections[0]:
         v20_render_finance()
     with finance_sections[1]:
         v201_render_assets_equity()
 
-with main_sections[7]:
+with main_sections[8]:
     st.subheader("Team")
 
     if not v171_is_signed_in():
@@ -7633,7 +8073,7 @@ with main_sections[7]:
             else:
                 st.info("Only an Owner or Manager can invite employees.")
 
-with main_sections[8]:
+with main_sections[9]:
     st.subheader("Plan & AI")
     st.caption("Manage your Sullivan membership, team seats, billing status, and AI usage.")
 
@@ -7881,14 +8321,14 @@ with main_sections[8]:
                     else:
                         st.dataframe(usage,use_container_width=True,hide_index=True)
 
-with main_sections[9]:
+with main_sections[10]:
     accountant_tabs=st.tabs([
         "Import & Analyze","Question Queue","Chart of Accounts","Opening Balances",
         "Saved Ledger","General Ledger","Manual Journals","Corrections / Reversals",
         "Accounting Periods","Smart Close","Integrity Center","Audit Trail","Accountant Export"
     ])
 
-with main_sections[10]:
+with main_sections[11]:
     st.subheader("Settings")
     st.caption("Manage your Sullivan preferences, workspaces, account details, and support options.")
 
