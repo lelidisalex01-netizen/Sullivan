@@ -11,7 +11,7 @@ import stripe
 import requests
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V19.4.3", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V19.4.4", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -4115,7 +4115,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.4.3</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.4.4</span></div>",unsafe_allow_html=True)
 
 
 
@@ -6864,18 +6864,94 @@ with home_tabs[0]:
                 )
             )
 
-            lines = base.mark_line(strokeWidth=3).encode(
+            # V19.4.4: cleaner cash-outlook visualization.
+            # Cash balance is the visual focus; inflow/outflow remain visible but quieter.
+            cash_only = melted[melted["Series"] == "Cash balance"]
+
+            cash_area = alt.Chart(cash_only).mark_area(
+                interpolate="monotone",
+                opacity=0.12,
+                line=False
+            ).encode(
+                x=alt.X(
+                    "date:T",
+                    title=None,
+                    axis=alt.Axis(
+                        format="%b %d",
+                        labelColor=axis_text,
+                        labelAngle=0,
+                        tickColor=grid_color,
+                        domainColor=grid_color,
+                        grid=False,
+                        labelPadding=10
+                    )
+                ),
+                y=alt.Y(
+                    "Amount:Q",
+                    title=None,
+                    axis=alt.Axis(
+                        format="$,.0f",
+                        labelColor=axis_text,
+                        tickColor=grid_color,
+                        domainColor=grid_color,
+                        gridColor=grid_color,
+                        gridOpacity=0.38,
+                        labelPadding=10
+                    )
+                ),
+                color=alt.value("#4B9BFF")
+            )
+
+            cash_line = alt.Chart(cash_only).mark_line(
+                interpolate="monotone",
+                strokeWidth=3.4,
+                color="#4B9BFF"
+            ).encode(
+                x="date:T",
+                y="Amount:Q",
                 tooltip=[
                     alt.Tooltip("date:T", title="Date", format="%b %d, %Y"),
-                    alt.Tooltip("Series:N", title="Series"),
+                    alt.Tooltip("Amount:Q", title="Projected bank balance", format="$,.2f"),
+                ]
+            )
+
+            movement_lines = alt.Chart(
+                melted[melted["Series"].isin(["Money in", "Money out"])]
+            ).mark_line(
+                interpolate="monotone",
+                strokeWidth=2.1,
+                opacity=0.82
+            ).encode(
+                x="date:T",
+                y="Amount:Q",
+                color=alt.Color(
+                    "Series:N",
+                    scale=alt.Scale(
+                        domain=["Money in", "Money out"],
+                        range=["#34C978", "#FF6673"]
+                    ),
+                    legend=alt.Legend(
+                        orient="top",
+                        direction="horizontal",
+                        title=None,
+                        labelColor=legend_text,
+                        labelFontSize=12,
+                        symbolStrokeWidth=3,
+                        padding=4
+                    )
+                ),
+                tooltip=[
+                    alt.Tooltip("date:T", title="Date", format="%b %d, %Y"),
+                    alt.Tooltip("Series:N", title="Movement"),
                     alt.Tooltip("Amount:Q", title="Amount", format="$,.2f"),
                 ]
             )
 
-            points = base.mark_point(
+            hover_points = base.mark_circle(
+                size=88,
                 filled=True,
-                size=70,
-                strokeWidth=1.5
+                stroke="#FFFFFF",
+                strokeWidth=1.3
             ).encode(
                 opacity=alt.condition(nearest, alt.value(1), alt.value(0))
             )
@@ -6885,24 +6961,42 @@ with home_tabs[0]:
             ).add_params(nearest)
 
             rule = alt.Chart(melted).mark_rule(
-                strokeDash=[4,4],
-                color="#7E94A8"
+                strokeDash=[3,5],
+                strokeWidth=1,
+                color="#8CA0B4",
+                opacity=0.7
             ).encode(
                 x="date:T"
             ).transform_filter(nearest)
 
-            chart = (lines + points + selectors + rule).properties(
-                height=285,
-                background=chart_bg
+            chart = (
+                cash_area
+                + cash_line
+                + movement_lines
+                + hover_points
+                + selectors
+                + rule
+            ).properties(
+                height=325,
+                background=chart_bg,
+                padding={"left": 8, "right": 12, "top": 8, "bottom": 4}
             ).configure_view(
                 stroke=grid_color,
-                strokeWidth=1
+                strokeWidth=1,
+                cornerRadius=10
             ).configure_axis(
-                titleColor=axis_text
+                titleColor=axis_text,
+                labelFontSize=11
+            ).configure_legend(
+                orient="top",
+                labelColor=legend_text
             )
 
             st.altair_chart(chart, width="stretch")
-            st.caption("Hover over the chart to see the exact projected amount for each day.")
+            st.caption(
+                "Blue = projected bank balance • Green = money expected in • Red = bills expected out. "
+                "Hover anywhere on the graph for exact values."
+            )
         except Exception:
             st.line_chart(forecast.set_index("date")[["Cash balance"]],height=285)
 
