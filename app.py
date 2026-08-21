@@ -5,6 +5,7 @@ from typing import Optional
 from datetime import date, datetime, timedelta
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from io import BytesIO
 from dotenv import load_dotenv, set_key
 from openai import OpenAI
@@ -12,7 +13,7 @@ import stripe
 import requests
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V19.5.1", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V19.5.2", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -4116,7 +4117,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.5.1</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.5.2</span></div>",unsafe_allow_html=True)
 
 
 
@@ -6953,8 +6954,17 @@ with home_tabs[0]:
 
             end_x, end_y = pts[-1]
 
-            st.markdown(
-                textwrap.dedent(f"""
+            chart_html = textwrap.dedent(f"""
+                <style>
+                html, body {{
+                    margin:0;
+                    padding:0;
+                    background:transparent;
+                    overflow:hidden;
+                    font-family:Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                }}
+                * {{ box-sizing:border-box; }}
+                </style>
                 <div style="
                     background:{card_bg};
                     border:1px solid {border};
@@ -7067,8 +7077,15 @@ with home_tabs[0]:
                         <span style="margin-left:auto;">Hover over transaction points for details</span>
                     </div>
                 </div>
-                """).strip(),
-                unsafe_allow_html=True
+                """).strip()
+
+            # V19.5.2: render the SVG inside a real HTML component.
+            # st.markdown was still treating portions of the SVG/HTML as Markdown
+            # source in Streamlit Cloud. components.html bypasses Markdown parsing.
+            components.html(
+                chart_html,
+                height=500,
+                scrolling=False,
             )
 
         except Exception as cash_chart_error:
