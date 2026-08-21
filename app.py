@@ -11,7 +11,7 @@ import stripe
 import requests
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V19.4.9", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V19.5", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -4115,7 +4115,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.4.9</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.5</span></div>",unsafe_allow_html=True)
 
 
 
@@ -6798,335 +6798,298 @@ with home_tabs[0]:
     lower_left,lower_right=st.columns([1.12,1],gap="medium")
 
     with lower_left:
-        st.markdown('<div class="section-heading">30-day cash outlook</div>',unsafe_allow_html=True)
-        forecast=v14_cash_forecast(30)
+        st.markdown('<div class="section-heading">Cash activity</div>',unsafe_allow_html=True)
+        # V19.5 — Recent cash activity.
+        # No Altair/Vega dependency: Sullivan renders a responsive stock-style SVG
+        # using the current workspace's actual recent bank transactions.
         try:
-            melted=forecast.melt(
-                "date",
-                value_vars=["Cash balance","Money in","Money out"],
-                var_name="Series",
-                value_name="Amount"
-            )
+            activity = trans().copy()
+
+            if not activity.empty:
+                activity["amount"] = pd.to_numeric(activity["amount"], errors="coerce").fillna(0.0)
+                activity["chart_date"] = pd.to_datetime(activity["date"], errors="coerce")
+                activity = activity.dropna(subset=["chart_date"])
+                activity = activity.sort_values(["chart_date", "id"]).tail(30).reset_index(drop=True)
+
+            current_cash = float(m["bank"])
+
+            if not activity.empty:
+                displayed_net = float(activity["amount"].sum())
+                opening_cash = current_cash - displayed_net
+
+                cash_points = [opening_cash]
+                cash_dates = [activity.iloc[0]["chart_date"] - pd.Timedelta(days=1)]
+                event_amounts = [0.0]
+
+                running = opening_cash
+                for _, row in activity.iterrows():
+                    running += float(row["amount"])
+                    cash_points.append(running)
+                    cash_dates.append(row["chart_date"])
+                    event_amounts.append(float(row["amount"]))
+            else:
+                today_ts = pd.Timestamp(date.today())
+                cash_points = [current_cash, current_cash]
+                cash_dates = [today_ts - pd.Timedelta(days=7), today_ts]
+                event_amounts = [0.0, 0.0]
 
             is_dark = st.session_state.get("v19_ui_theme") == "Dark"
-            chart_bg = "#111F30" if is_dark else "#FFFFFF"
-            axis_text = "#DCE6EF" if is_dark else "#63788C"
-            grid_color = "#29415A" if is_dark else "#EAF0F6"
-            legend_text = "#E8F0F7" if is_dark else "#425B72"
 
-            nearest = alt.selection_point(
-                nearest=True,
-                on="pointerover",
-                fields=["date"],
-                empty=False
-            )
-
-            base = alt.Chart(melted).encode(
-                x=alt.X(
-                    "date:T",
-                    title=None,
-                    axis=alt.Axis(
-                        format="%b %d",
-                        labelColor=axis_text,
-                        labelAngle=0,
-                        tickColor=grid_color,
-                        domainColor=grid_color,
-                        grid=False,
-                        labelPadding=8
-                    )
-                ),
-                y=alt.Y(
-                    "Amount:Q",
-                    title=None,
-                    axis=alt.Axis(
-                        format="$,.0f",
-                        labelColor=axis_text,
-                        tickColor=grid_color,
-                        domainColor=grid_color,
-                        gridColor=grid_color,
-                        gridOpacity=0.55,
-                        labelPadding=8
-                    )
-                ),
-                color=alt.Color(
-                    "Series:N",
-                    scale=alt.Scale(
-                        domain=["Money in","Money out","Cash balance"],
-                        range=["#34C978","#FF6673","#4B9BFF"]
-                    ),
-                    legend=alt.Legend(
-                        orient="top",
-                        title=None,
-                        labelColor=legend_text,
-                        symbolStrokeWidth=4,
-                        labelFontSize=12
-                    )
-                )
-            )
-
-            # V19.4.9: custom Sullivan stock-style chart.
-            # This intentionally does NOT use Altair/Vega. The previous enhanced
-            # charts were failing at runtime on Streamlit Cloud, so Sullivan now
-            # renders its own responsive SVG finance chart directly in the app.
-            cash_df = forecast[["date", "Cash balance", "Money in", "Money out"]].copy().sort_values("date")
-
-            is_dark = st.session_state.get("v19_ui_theme") == "Dark"
-            card_bg = "#102338" if is_dark else "#F7FAFD"
-            plot_bg = "#0B1929" if is_dark else "#EFF6FC"
+            card_bg = "#102338" if is_dark else "#FFFFFF"
+            plot_bg = "#0A1828" if is_dark else "#F4F9FD"
+            border = "#294763" if is_dark else "#DCE8F2"
+            grid = "#29445E" if is_dark else "#DCE8F2"
             text_main = "#F7FBFF" if is_dark else "#102A43"
-            text_muted = "#9EB2C5" if is_dark else "#6B7F93"
-            border = "#294763" if is_dark else "#D8E5EF"
-            grid = "#29445E" if is_dark else "#D7E4EF"
+            text_muted = "#9FB4C8" if is_dark else "#718499"
+
             blue = "#2F80ED"
-            blue_glow = "#66AAFF"
-            green = "#20C77A"
-            red = "#F05A67"
+            blue_light = "#69AEFF"
+            green = "#22C879"
+            red = "#F25563"
 
-            balance_values = [float(v) for v in cash_df["Cash balance"].tolist()]
-            current_balance = balance_values[0] if balance_values else 0.0
-            ending_balance = balance_values[-1] if balance_values else 0.0
-            delta = ending_balance - current_balance
-            delta_sign = "+" if delta >= 0 else ""
-            delta_color = green if delta >= 0 else red
-
-            # SVG chart dimensions. viewBox keeps it responsive at any browser width.
-            W, H = 1000.0, 350.0
-            left, right, top, bottom = 78.0, 28.0, 28.0, 52.0
+            W, H = 1000.0, 330.0
+            left, right, top, bottom = 74.0, 24.0, 24.0, 48.0
             plot_w = W - left - right
             plot_h = H - top - bottom
 
-            if not balance_values:
-                balance_values = [0.0]
-
-            raw_min = min(balance_values)
-            raw_max = max(balance_values)
-            span = max(raw_max - raw_min, abs(raw_max) * 0.025, 60.0)
-            pad = max(span * 0.34, 75.0)
+            vals = [float(v) for v in cash_points]
+            raw_min = min(vals)
+            raw_max = max(vals)
+            span = max(raw_max - raw_min, abs(raw_max) * 0.025, 75.0)
+            pad = max(span * 0.28, 75.0)
             y_min = raw_min - pad
             y_max = raw_max + pad
             y_span = max(y_max - y_min, 1.0)
 
-            n = max(len(cash_df), 1)
+            n = max(len(vals), 1)
 
-            def sx(i):
+            def x_at(i):
                 if n <= 1:
                     return left + plot_w / 2
-                return left + (float(i) / float(n - 1)) * plot_w
+                return left + (i / (n - 1)) * plot_w
 
-            def sy(value):
-                return top + (1.0 - ((float(value) - y_min) / y_span)) * plot_h
+            def y_at(v):
+                return top + (1 - ((float(v) - y_min) / y_span)) * plot_h
 
-            points = [(sx(i), sy(v)) for i, v in enumerate(balance_values)]
+            pts = [(x_at(i), y_at(v)) for i, v in enumerate(vals)]
 
-            def smooth_path(pts):
-                """Smooth quadratic SVG path with rounded stock-chart movement."""
-                if not pts:
+            def smooth_svg_path(points):
+                if not points:
                     return ""
-                if len(pts) == 1:
-                    return f"M {pts[0][0]:.2f} {pts[0][1]:.2f}"
-                d = [f"M {pts[0][0]:.2f} {pts[0][1]:.2f}"]
-                for i in range(1, len(pts)):
-                    x0, y0 = pts[i - 1]
-                    x1, y1 = pts[i]
-                    mx = (x0 + x1) / 2.0
-                    my = (y0 + y1) / 2.0
-                    d.append(f"Q {x0:.2f} {y0:.2f} {mx:.2f} {my:.2f}")
-                d.append(f"T {pts[-1][0]:.2f} {pts[-1][1]:.2f}")
-                return " ".join(d)
+                if len(points) == 1:
+                    x, y = points[0]
+                    return f"M {x:.2f} {y:.2f}"
 
-            line_path = smooth_path(points)
-            if points:
-                area_path = (
-                    line_path
-                    + f" L {points[-1][0]:.2f} {top + plot_h:.2f}"
-                    + f" L {points[0][0]:.2f} {top + plot_h:.2f} Z"
-                )
-            else:
-                area_path = ""
+                out = [f"M {points[0][0]:.2f} {points[0][1]:.2f}"]
+                for i in range(1, len(points)):
+                    x0, y0 = points[i - 1]
+                    x1, y1 = points[i]
+                    mid_x = (x0 + x1) / 2
+                    out.append(
+                        f"C {mid_x:.2f} {y0:.2f}, {mid_x:.2f} {y1:.2f}, {x1:.2f} {y1:.2f}"
+                    )
+                return " ".join(out)
 
-            # Four calm horizontal guide lines.
-            grid_svg = []
-            for gi in range(5):
-                val = y_min + (y_span * gi / 4.0)
-                yy = sy(val)
-                grid_svg.append(
+            line_path = smooth_svg_path(pts)
+            floor_y = top + plot_h
+            area_path = (
+                line_path
+                + f" L {pts[-1][0]:.2f} {floor_y:.2f}"
+                + f" L {pts[0][0]:.2f} {floor_y:.2f} Z"
+            )
+
+            grid_parts = []
+            for i in range(4):
+                value = y_min + (y_span * i / 3)
+                yy = y_at(value)
+                grid_parts.append(
                     f'<line x1="{left:.1f}" y1="{yy:.1f}" x2="{W-right:.1f}" y2="{yy:.1f}" '
-                    f'stroke="{grid}" stroke-width="1" opacity="0.55" stroke-dasharray="3 6"/>'
+                    f'stroke="{grid}" stroke-width="1" opacity="0.42" stroke-dasharray="4 7"/>'
                 )
-                grid_svg.append(
-                    f'<text x="{left-13:.1f}" y="{yy+4:.1f}" text-anchor="end" '
-                    f'fill="{text_muted}" font-size="12">${val:,.0f}</text>'
+                grid_parts.append(
+                    f'<text x="{left-12:.1f}" y="{yy+4:.1f}" text-anchor="end" '
+                    f'fill="{text_muted}" font-size="11">${value:,.0f}</text>'
                 )
 
-            # Date labels — only 6 so the chart stays calm.
-            date_svg = []
-            if len(cash_df) > 0:
-                label_indexes = sorted(set(
-                    int(round(i * (len(cash_df)-1) / 5.0)) for i in range(6)
+            date_parts = []
+            label_count = min(6, len(cash_dates))
+            if label_count:
+                indexes = sorted(set(
+                    int(round(i * (len(cash_dates)-1) / max(label_count-1, 1)))
+                    for i in range(label_count)
                 ))
-                for idx in label_indexes:
-                    dt = cash_df.iloc[idx]["date"]
-                    try:
-                        label = pd.to_datetime(dt).strftime("%b %d")
-                    except Exception:
-                        label = str(dt)
-                    date_svg.append(
-                        f'<text x="{sx(idx):.1f}" y="{H-18:.1f}" text-anchor="middle" '
-                        f'fill="{text_muted}" font-size="12">{label}</text>'
+                for idx in indexes:
+                    label = pd.to_datetime(cash_dates[idx]).strftime("%b %d")
+                    date_parts.append(
+                        f'<text x="{x_at(idx):.1f}" y="{H-15:.1f}" text-anchor="middle" '
+                        f'fill="{text_muted}" font-size="11">{label}</text>'
                     )
 
-            # Cash movement markers.
-            event_svg = []
-            hover_svg = []
-            for idx, row in cash_df.reset_index(drop=True).iterrows():
-                x = sx(idx)
-                y = sy(float(row["Cash balance"]))
-                money_in = float(row["Money in"] or 0)
-                money_out = float(row["Money out"] or 0)
-                try:
-                    dlabel = pd.to_datetime(row["date"]).strftime("%b %d, %Y")
-                except Exception:
-                    dlabel = str(row["date"])
+            event_parts = []
+            for i in range(1, len(vals)):
+                amount = float(event_amounts[i])
+                x, y = pts[i]
+                dt_label = pd.to_datetime(cash_dates[i]).strftime("%b %d, %Y")
+                event_color = green if amount >= 0 else red
+                direction = "Money in" if amount >= 0 else "Money out"
 
-                # Invisible larger hover point with native SVG tooltip.
-                hover_svg.append(
-                    f'<circle cx="{x:.2f}" cy="{y:.2f}" r="10" fill="transparent">'
-                    f'<title>{dlabel} — Projected cash ${float(row["Cash balance"]):,.2f} '
-                    f'— Money in ${money_in:,.2f} — Money out ${money_out:,.2f}</title>'
+                event_parts.append(
+                    f'<circle cx="{x:.2f}" cy="{y:.2f}" r="5.0" '
+                    f'fill="{event_color}" stroke="{plot_bg}" stroke-width="2.2">'
+                    f'<title>{dt_label} — {direction} ${abs(amount):,.2f} — Cash ${vals[i]:,.2f}</title>'
                     f'</circle>'
                 )
+                event_parts.append(
+                    f'<circle cx="{x:.2f}" cy="{y:.2f}" r="12" fill="transparent">'
+                    f'<title>{dt_label} — Cash ${vals[i]:,.2f}</title></circle>'
+                )
 
-                if money_in > 0:
-                    event_svg.append(
-                        f'<circle cx="{x:.2f}" cy="{y:.2f}" r="5.4" fill="{green}" '
-                        f'stroke="{plot_bg}" stroke-width="2.5">'
-                        f'<title>{dlabel} — Money in ${money_in:,.2f}</title></circle>'
-                    )
-                if money_out > 0:
-                    event_svg.append(
-                        f'<circle cx="{x:.2f}" cy="{y:.2f}" r="5.4" fill="{red}" '
-                        f'stroke="{plot_bg}" stroke-width="2.5">'
-                        f'<title>{dlabel} — Money out ${money_out:,.2f}</title></circle>'
-                    )
+            start_cash = float(vals[0])
+            end_cash = float(vals[-1])
+            change = end_cash - start_cash
+            change_sign = "+" if change >= 0 else ""
+            change_color = green if change >= 0 else red
 
-            end_x, end_y = points[-1] if points else (left, top + plot_h/2)
+            end_x, end_y = pts[-1]
 
             st.markdown(
                 f"""
-                <div class="sullivan-stock-card" style="
+                <div style="
                     background:{card_bg};
                     border:1px solid {border};
                     border-radius:24px;
                     overflow:hidden;
-                    box-shadow:0 16px 38px rgba(0,0,0,0.10);
-                    margin-top:4px;
+                    box-shadow:0 14px 34px rgba(0,0,0,.08);
                 ">
                     <div style="
                         display:flex;
                         justify-content:space-between;
                         align-items:flex-end;
-                        gap:18px;
                         flex-wrap:wrap;
-                        padding:20px 24px 10px 24px;
+                        gap:16px;
+                        padding:20px 22px 12px 22px;
                     ">
                         <div>
                             <div style="
                                 color:{text_muted};
-                                text-transform:uppercase;
-                                letter-spacing:.09em;
                                 font-size:.72rem;
                                 font-weight:800;
-                            ">Projected cash</div>
+                                letter-spacing:.08em;
+                                text-transform:uppercase;
+                            ">Recent cash activity</div>
                             <div style="
                                 color:{text_main};
-                                font-size:2.05rem;
+                                font-size:2rem;
+                                line-height:1.05;
                                 font-weight:850;
-                                line-height:1.1;
                                 margin-top:5px;
-                            ">${ending_balance:,.2f}</div>
+                            ">${end_cash:,.2f}</div>
                         </div>
+
                         <div style="text-align:right;">
-                            <div style="color:{text_muted};font-size:.78rem;font-weight:650;">
-                                Next 30 days
+                            <div style="color:{text_muted};font-size:.77rem;font-weight:650;">
+                                Last {len(activity)} transactions
                             </div>
-                            <div style="color:{delta_color};font-size:1rem;font-weight:850;margin-top:4px;">
-                                {delta_sign}${delta:,.2f}
-                            </div>
+                            <div style="
+                                color:{change_color};
+                                font-size:1rem;
+                                font-weight:850;
+                                margin-top:4px;
+                            ">{change_sign}${change:,.2f}</div>
                         </div>
                     </div>
 
                     <div style="
-                        margin:8px 14px 12px 14px;
+                        margin:6px 12px 12px 12px;
                         background:{plot_bg};
                         border:1px solid {border};
                         border-radius:20px;
                         overflow:hidden;
-                        padding:2px 4px 0 4px;
                     ">
-                        <svg viewBox="0 0 {W:.0f} {H:.0f}" width="100%" height="auto"
+                        <svg viewBox="0 0 {W:.0f} {H:.0f}"
+                             width="100%"
                              preserveAspectRatio="xMidYMid meet"
                              style="display:block;min-height:260px;">
                             <defs>
-                                <linearGradient id="sullivanCashFill" x1="0" y1="0" x2="0" y2="1">
-                                    <stop offset="0%" stop-color="{blue}" stop-opacity="0.28"/>
-                                    <stop offset="58%" stop-color="{blue}" stop-opacity="0.09"/>
+                                <linearGradient id="cashFillV195" x1="0" y1="0" x2="0" y2="1">
+                                    <stop offset="0%" stop-color="{blue}" stop-opacity=".28"/>
+                                    <stop offset="60%" stop-color="{blue}" stop-opacity=".08"/>
                                     <stop offset="100%" stop-color="{blue}" stop-opacity="0"/>
                                 </linearGradient>
-                                <filter id="sullivanLineGlow" x="-20%" y="-20%" width="140%" height="140%">
-                                    <feGaussianBlur stdDeviation="5" result="blur"/>
+                                <filter id="cashGlowV195" x="-20%" y="-20%" width="140%" height="140%">
+                                    <feGaussianBlur stdDeviation="4"/>
                                 </filter>
                             </defs>
 
-                            {''.join(grid_svg)}
-                            {''.join(date_svg)}
+                            {''.join(grid_parts)}
+                            {''.join(date_parts)}
 
-                            <path d="{area_path}" fill="url(#sullivanCashFill)" stroke="none"/>
+                            <path d="{area_path}" fill="url(#cashFillV195)"/>
 
-                            <path d="{line_path}" fill="none" stroke="{blue_glow}" stroke-width="10"
-                                  opacity="0.11" stroke-linecap="round" stroke-linejoin="round"
-                                  filter="url(#sullivanLineGlow)"/>
+                            <path d="{line_path}"
+                                  fill="none"
+                                  stroke="{blue_light}"
+                                  stroke-width="10"
+                                  opacity=".10"
+                                  stroke-linecap="round"
+                                  stroke-linejoin="round"
+                                  filter="url(#cashGlowV195)"/>
 
-                            <path d="{line_path}" fill="none" stroke="{blue}" stroke-width="4.2"
-                                  stroke-linecap="round" stroke-linejoin="round"/>
+                            <path d="{line_path}"
+                                  fill="none"
+                                  stroke="{blue}"
+                                  stroke-width="4"
+                                  stroke-linecap="round"
+                                  stroke-linejoin="round"/>
 
-                            {''.join(event_svg)}
-                            {''.join(hover_svg)}
+                            {''.join(event_parts)}
 
                             <circle cx="{end_x:.2f}" cy="{end_y:.2f}" r="10"
-                                    fill="{blue}" opacity="0.18"/>
+                                    fill="{blue}" opacity=".16"/>
                             <circle cx="{end_x:.2f}" cy="{end_y:.2f}" r="5.2"
-                                    fill="{blue}" stroke="{plot_bg}" stroke-width="2.2"/>
+                                    fill="{blue}" stroke="{plot_bg}" stroke-width="2"/>
                         </svg>
                     </div>
 
                     <div style="
                         display:flex;
-                        align-items:center;
                         gap:18px;
+                        align-items:center;
                         flex-wrap:wrap;
                         color:{text_muted};
                         font-size:.76rem;
-                        padding:0 22px 18px 22px;
+                        padding:0 20px 18px 20px;
                     ">
-                        <span><b style="color:{blue};">●</b>&nbsp; Projected balance</span>
-                        <span><b style="color:{green};">●</b>&nbsp; Cash in</span>
-                        <span><b style="color:{red};">●</b>&nbsp; Cash out</span>
-                        <span style="margin-left:auto;">Hover over the line for exact values</span>
+                        <span><b style="color:{blue};">●</b>&nbsp; Cash balance</span>
+                        <span><b style="color:{green};">●</b>&nbsp; Money in</span>
+                        <span><b style="color:{red};">●</b>&nbsp; Money out</span>
+                        <span style="margin-left:auto;">Hover over transaction points for details</span>
                     </div>
                 </div>
                 """,
                 unsafe_allow_html=True
             )
-        except Exception as chart_error:
-            print(f"V19.4.9 custom cash outlook error: {type(chart_error).__name__}: {chart_error}")
-            st.warning("Cash outlook is temporarily unavailable.")
 
-        projected=float(forecast["Cash balance"].iloc[-1]) if not forecast.empty else m["bank"]
+        except Exception as cash_chart_error:
+            st.error(
+                f"Cash activity chart error: "
+                f"{type(cash_chart_error).__name__}: {cash_chart_error}"
+            )
+
         x,y,z=st.columns(3)
-        x.metric("Money expected in",f"${float(forecast['Money in'].sum()):,.2f}")
-        y.metric("Bills to pay",f"${float(forecast['Money out'].sum()):,.2f}")
-        z.metric("Projected cash",f"${projected:,.2f}")
-        st.caption("Estimate based on open invoices and bills due over the next 30 days.")
+        recent_tx = trans().copy()
+        if not recent_tx.empty:
+            recent_tx["amount"] = pd.to_numeric(recent_tx["amount"], errors="coerce").fillna(0.0)
+            recent_tx = recent_tx.tail(30)
+            recent_in = float(recent_tx.loc[recent_tx["amount"] > 0, "amount"].sum())
+            recent_out = abs(float(recent_tx.loc[recent_tx["amount"] < 0, "amount"].sum()))
+        else:
+            recent_in = 0.0
+            recent_out = 0.0
+        x.metric("Recent money in",f"${recent_in:,.2f}")
+        y.metric("Recent money out",f"${recent_out:,.2f}")
+        z.metric("Current cash",f'${float(m["bank"]):,.2f}')
+        st.caption("Based on the most recent bank transactions in this workspace.")
 
     with lower_right:
         st.markdown('<div class="section-heading">Recent activity</div>',unsafe_allow_html=True)
