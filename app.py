@@ -1,4 +1,4 @@
-import os, re, sqlite3, hashlib, json, zipfile, shutil, uuid
+import os, re, sqlite3, hashlib, json, zipfile, shutil, uuid, secrets, hmac, base64
 from pathlib import Path
 from typing import Optional
 from datetime import date, datetime, timedelta
@@ -9,10 +9,10 @@ from dotenv import load_dotenv, set_key
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan", layout="wide")
+st.set_page_config(page_title="Sullivan V17.2", page_icon="S", layout="wide")
 
 
-# Sullivan V17.1 visual system: calm navy + blue + mint + warm amber.
+# Sullivan V17.2 visual system: calm navy + blue + mint + warm amber.
 APP_DIR = Path(__file__).resolve().parent
 ENV_PATH = APP_DIR / ".env"
 DB_PATH = APP_DIR / "sullivan.db"
@@ -2520,6 +2520,12 @@ def v17_init_auth_tables():
             used_by_user_id INTEGER,
             used_at TEXT
         )""")
+        # V17.2 migrations for Google/OIDC identities.
+        user_cols = [r[1] for r in c.execute("PRAGMA table_info(app_users)").fetchall()]
+        if "auth_provider" not in user_cols:
+            c.execute("ALTER TABLE app_users ADD COLUMN auth_provider TEXT DEFAULT 'email'")
+        if "provider_subject" not in user_cols:
+            c.execute("ALTER TABLE app_users ADD COLUMN provider_subject TEXT")
     write(f)
 
 def create_app_user(full_name,email,password,personal_account=True):
@@ -2541,6 +2547,125 @@ def create_app_user(full_name,email,password,personal_account=True):
     uid=write(f)
     return uid,user_code
 
+
+def _streamlit_oidc_logged_in():
+    """Return True only when Streamlit native OIDC is configured and authenticated."""
+    try:
+        return bool(st.user.is_logged_in)
+    except Exception:
+        return False
+
+def _streamlit_user_value(key, default=""):
+    try:
+        value = st.user.get(key, default)
+    except Exception:
+        try:
+            value = getattr(st.user, key, default)
+        except Exception:
+            value = default
+    return value or default
+
+def sync_google_user():
+    """
+    Link a successfully authenticated Google/OIDC identity to Sullivan's local
+    user record. The Google identity is trusted from Streamlit's OIDC cookie,
+    not from user-entered form fields.
+    """
+    if not _streamlit_oidc_logged_in():
+        return None
+
+    email = str(_streamlit_user_value("email", "")).strip().lower()
+    full_name = str(_streamlit_user_value("name", "")).strip()
+    subject = str(_streamlit_user_value("sub", "")).strip()
+
+    if not email or "@" not in email:
+        raise ValueError("Google did not provide an email address Sullivan can use.")
+
+    if not full_name:
+        full_name = email.split("@", 1)[0]
+
+    existing = read(
+        """SELECT id,user_code,email,full_name,personal_account,active,
+                  COALESCE(auth_provider,'email') AS auth_provider,
+                  provider_subject
+           FROM app_users WHERE email=?""",
+        (email,)
+    )
+
+    stamp = datetime.now().isoformat(timespec="seconds")
+
+    if existing.empty:
+        # app_users was originally built for email/password, so Google accounts
+        # receive an unusable random password hash while authentication remains
+        # controlled entirely by Google OIDC.
+        salt, password_hash = _pwd_hash(secrets.token_urlsafe(48))
+        user_code = _new_user_id()
+
+        def create_google_user(c):
+            c.execute(
+                """INSERT INTO app_users(
+                       user_code,email,full_name,password_salt,password_hash,
+                       personal_account,active,created_at,last_login_at,
+                       auth_provider,provider_subject
+                   ) VALUES(?,?,?,?,?,?,1,?,?,?,?,?)""",
+                (
+                    user_code, email, full_name, salt, password_hash,
+                    1, stamp, stamp, "google", subject
+                )
+            )
+            return int(c.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+        uid = write(create_google_user)
+        return {
+            "id": uid,
+            "user_code": user_code,
+            "email": email,
+            "full_name": full_name,
+            "personal_account": True,
+            "auth_provider": "google",
+        }
+
+    r = existing.iloc[0]
+    if not int(r.active):
+        raise ValueError("This Sullivan account is disabled.")
+
+    uid = int(r.id)
+
+    def update_google_user(c):
+        c.execute(
+            """UPDATE app_users
+               SET full_name=?,last_login_at=?,auth_provider='google',
+                   provider_subject=COALESCE(NULLIF(?,''),provider_subject)
+               WHERE id=?""",
+            (full_name, stamp, subject, uid)
+        )
+
+    write(update_google_user)
+
+    return {
+        "id": uid,
+        "user_code": r.user_code,
+        "email": email,
+        "full_name": full_name,
+        "personal_account": bool(int(r.personal_account)),
+        "auth_provider": "google",
+    }
+
+def load_default_workspace_for_user(user):
+    """Select a company automatically only when there is exactly one membership."""
+    memberships = company_memberships(user["id"])
+    if len(memberships) == 1:
+        r = memberships.iloc[0]
+        st.session_state["auth_company"] = {
+            "company_id": int(r.company_id),
+            "company_code": r.company_code,
+            "company_name": r.company_name,
+            "subscription_plan": r.subscription_plan,
+        }
+        st.session_state["auth_role"] = r.role
+    elif not st.session_state.get("auth_company"):
+        st.session_state["auth_role"] = "Personal"
+
 def authenticate_user(email,password):
     email=(email or "").strip().lower()
     d=read("""SELECT id,user_code,email,full_name,password_salt,password_hash,personal_account,active
@@ -2552,7 +2677,8 @@ def authenticate_user(email,password):
     write(lambda c:c.execute("UPDATE app_users SET last_login_at=? WHERE id=?",(datetime.now().isoformat(timespec="seconds"),int(r.id))))
     return {
         "id":int(r.id),"user_code":r.user_code,"email":r.email,"full_name":r.full_name,
-        "personal_account":bool(int(r.personal_account))
+        "personal_account":bool(int(r.personal_account)),
+        "auth_provider":"email"
     }
 
 def create_company_for_user(user_id,company_name):
@@ -2630,13 +2756,12 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.set_page_config(page_title="Sullivan V17.1",page_icon="S",layout="wide")
 st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V15</span></div>",unsafe_allow_html=True)
 
 
 
 # ==========================
-# V17.1 guest-first access
+# V17.2 guest-first access
 # ==========================
 if "auth_user" not in st.session_state:
     st.session_state["auth_user"] = None
@@ -2648,6 +2773,20 @@ if "v171_auth_open" not in st.session_state:
     st.session_state["v171_auth_open"] = False
 if "v171_auth_reason" not in st.session_state:
     st.session_state["v171_auth_reason"] = ""
+
+
+# V17.2: if Streamlit has a valid Google OIDC identity, turn it into a
+# Sullivan account automatically after Google redirects back to the app.
+if _streamlit_oidc_logged_in():
+    try:
+        google_user = sync_google_user()
+        if google_user:
+            st.session_state["auth_user"] = google_user
+            load_default_workspace_for_user(google_user)
+            st.session_state["v171_auth_open"] = False
+            st.session_state["v171_auth_reason"] = ""
+    except Exception as e:
+        st.error(f"Google sign-in reached Sullivan, but the account could not be loaded: {e}")
 
 def v171_is_signed_in():
     return bool(st.session_state.get("auth_user"))
@@ -2716,7 +2855,14 @@ if st.session_state.get("v171_auth_open"):
     st.markdown("### Choose how you want to sign in")
     gcol,acol,ecol=st.columns(3)
     if gcol.button("🔵 Continue with Google",use_container_width=True,key="v171_google"):
-        st.info("Google sign-in is ready to connect when OAuth credentials are added to Sullivan's deployment.")
+        try:
+            st.login()
+        except Exception as e:
+            st.error(
+                "Google sign-in is not fully configured yet. "
+                "Check Streamlit Secrets and the Google redirect URI. "
+                f"Details: {e}"
+            )
     if acol.button(" Continue with Apple",use_container_width=True,key="v171_apple"):
         st.info("Apple sign-in is ready to connect when Apple OAuth credentials are added to Sullivan's deployment.")
     email_mode=ecol.button("✉ Continue with Email",use_container_width=True,key="v171_email_mode")
@@ -2734,18 +2880,7 @@ if st.session_state.get("v171_auth_open"):
                     st.error("Email or password is incorrect.")
                 else:
                     st.session_state["auth_user"]=u
-                    memberships=company_memberships(u["id"])
-                    if len(memberships)==1:
-                        r=memberships.iloc[0]
-                        st.session_state["auth_company"]={
-                            "company_id":int(r.company_id),
-                            "company_code":r.company_code,
-                            "company_name":r.company_name,
-                            "subscription_plan":r.subscription_plan
-                        }
-                        st.session_state["auth_role"]=r.role
-                    else:
-                        st.session_state["auth_role"]="Personal"
+                    load_default_workspace_for_user(u)
                     v171_close_auth()
                     st.success("Signed in.")
                     st.rerun()
@@ -2813,8 +2948,10 @@ with st.sidebar:
     auth_u=current_user()
     auth_c=current_company()
     if auth_u:
+        provider_label = "Google" if auth_u.get("auth_provider")=="google" else "Email"
         st.markdown(
-            f'<div class="account-strip"><div><b>{auth_u["full_name"]}</b><span>{st.session_state.get("auth_role","")}</span></div>'
+            f'<div class="account-strip"><div><b>{auth_u["full_name"]}</b>'
+            f'<span>{st.session_state.get("auth_role","")} · {provider_label}</span></div>'
             f'<div><span>{auth_c["company_name"] if auth_c else "Personal"}</span><br>'
             f'<span>{auth_c["company_code"] if auth_c else auth_u["user_code"]}</span></div></div>',
             unsafe_allow_html=True
@@ -2825,10 +2962,13 @@ with st.sidebar:
             v171_open_auth("Choose or join a workspace after signing in.")
             st.rerun()
         if st.button("Sign out",use_container_width=True,key="v171_sidebar_signout"):
+            provider = (auth_u or {}).get("auth_provider","email")
             logout_v17()
             st.session_state["auth_user"]=None
             st.session_state["auth_company"]=None
             st.session_state["auth_role"]="Guest"
+            if provider == "google" and _streamlit_oidc_logged_in():
+                st.logout()
             st.rerun()
     else:
         st.markdown(
@@ -2976,7 +3116,7 @@ div.stButton>button:hover{border-color:#1769E0!important;color:#1769E0!important
 }
 
 
-/* V17.1 — readable forms everywhere */
+/* V17.2 — readable forms everywhere */
 .main input,
 .main textarea,
 section.main input,
@@ -3060,7 +3200,7 @@ section.main textarea,
 
 
 
-/* V17.1 — sidebar readability fix */
+/* V17.2 — sidebar readability fix */
 section[data-testid="stSidebar"] label,
 section[data-testid="stSidebar"] label p,
 section[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p,
@@ -3079,7 +3219,7 @@ section[data-testid="stSidebar"] div[data-baseweb="select"] span {
 
 
 
-/* V17.1 polished Sullivan sidebar */
+/* V17.2 polished Sullivan sidebar */
 section[data-testid="stSidebar"] {
     background:
         linear-gradient(180deg,#061A30 0%,#07223D 55%,#082B4B 100%) !important;
@@ -3259,7 +3399,7 @@ section[data-testid="stSidebar"] [data-testid="stAlert"] * {
 
 
 
-/* V17.1 full contrast safety pass */
+/* V17.2 full contrast safety pass */
 
 /* MAIN WORKSPACE */
 [data-testid="stAppViewContainer"] label,
@@ -3347,7 +3487,7 @@ button[aria-label="Help"] svg {
     stroke:#52677B !important;
 }
 
-/* V17.1: Streamlit renders help icons differently by widget type.
+/* V17.2: Streamlit renders help icons differently by widget type.
    Force every widget-label help trigger to use the same clean question-mark treatment. */
 [data-testid="stWidgetLabel"] button,
 [data-testid="stWidgetLabel"] [role="button"],
@@ -3535,7 +3675,7 @@ section[data-testid="stSidebar"] [data-testid="stAlert"] * {
     color:#FFFFFF !important;
 }
 
-/* V17.1 — FINAL HELP ICON FIX
+/* V17.2 — FINAL HELP ICON FIX
    TextInput/NumberInput have broad button rules above for password/stepper controls.
    Streamlit places label help triggers inside those widget containers too, so those rules
    were repainting the help SVG as a solid dot. Keep this override LAST so help icons
@@ -3590,7 +3730,7 @@ button[data-baseweb="tab"]:not([aria-selected="true"]) p {
 
 
 
-/* V17.1 guest-first authentication */
+/* V17.2 guest-first authentication */
 .guest-card{
     background:rgba(255,255,255,.06);
     border:1px solid rgba(255,255,255,.10);
@@ -3721,7 +3861,7 @@ with main_sections[7]:
         "Accounting Periods","Smart Close","Integrity Center","Audit Trail","Accountant Export"
     ])
 
-# V17.1 navigation / action clarity
+# V17.2 navigation / action clarity
 if st.session_state.get("v13_destination"):
     st.success("You are looking for: **" + st.session_state["v13_destination"] + "**")
     if st.button("Clear destination"):
@@ -3862,7 +4002,7 @@ with home_tabs[0]:
             st.markdown('<div class="panel-v15">'+rows+'</div>',unsafe_allow_html=True)
 
     st.markdown(
-        '<footer class="footer-v15"><span>🛡 Your data is protected &nbsp; • &nbsp; Accounting controls are active &nbsp; • &nbsp; Advanced tools stay available</span><b>◆ Sullivan <small>V17.1</small></b></footer>',
+        '<footer class="footer-v15"><span>🛡 Your data is protected &nbsp; • &nbsp; Accounting controls are active &nbsp; • &nbsp; Advanced tools stay available</span><b>◆ Sullivan <small>V17.2</small></b></footer>',
         unsafe_allow_html=True
     )
 
@@ -5486,4 +5626,4 @@ with accountant_tabs[12]:
         with open(path,"rb") as f:st.download_button("Download package",f.read(),"sullivan_v15_4_accountant_package.zip","application/zip")
 
 st.divider()
-st.caption("Sullivan V17.1 globally enforces closed accounting periods while retaining V12.3 automatic document numbering.")
+st.caption("Sullivan V17.2 globally enforces closed accounting periods while retaining V12.3 automatic document numbering.")

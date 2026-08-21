@@ -1,30 +1,33 @@
-# Sullivan V17.1 — Guest-first access
+# Sullivan V17.2 — Real Google Sign-In
 
-V17.1 changes the account model so Sullivan is browseable without signing in.
+V17.2 keeps Sullivan's guest-first interface and connects the existing
+"Continue with Google" button to Streamlit native OIDC authentication.
 
-## Guest mode
-- Sullivan opens normally with no login wall.
-- Guests can explore Home, Bank, Taxes, Reports and the rest of the interface.
-- Real write actions are protected.
-- Import/upload controls are disabled until sign-in.
-- When a guest tries to save, create, post, import, record, reconcile, or otherwise change accounting data, Sullivan opens the sign-in panel.
+## What changed
+- Real Google login with `st.login()`
+- Google identity is read from `st.user`
+- Google users are automatically linked/created in Sullivan's existing user table
+- Existing company memberships are preserved by email
+- Google users can still join employers using Sullivan invite codes
+- Google sign-out uses `st.logout()`
+- Existing email/password login remains available
+- Apple remains a placeholder for the next authentication step
+- Authlib added to requirements
 
-## Sign-in panel
-- Continue with Google (OAuth hook ready for production credentials)
-- Continue with Apple (OAuth hook ready for production credentials)
-- Continue with Email (local email/password works now)
-- Clean light form styling
+## Required Streamlit Secrets
+Do NOT commit these values to GitHub.
 
-## Company employees
-- Separate "Are you a company employee?" section.
-- Employee signs into their personal Sullivan identity first.
-- Then employee joins using the one-time employer invite code.
-- Company names/Company IDs alone are not sufficient to gain access.
+[auth]
+redirect_uri = "https://sullivan-accounting.streamlit.app/oauth2callback"
+cookie_secret = "YOUR_PRIVATE_COOKIE_SECRET"
+client_id = "YOUR_GOOGLE_CLIENT_ID"
+client_secret = "YOUR_GOOGLE_CLIENT_SECRET"
+server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
 
-## Existing functionality
-- V16 Easy Import retained
-- V16 reconciliation retained
-- V15/V16 UI retained
-- V17 company/team database retained
+## Required Google redirect URI
+https://sullivan-accounting.streamlit.app/oauth2callback
 
-Note: Google and Apple OAuth require provider credentials in the deployed production environment. The buttons are wired as provider entry points but do not fake authentication locally.
+## GitHub update
+Replace the live repository's `app.py` and `requirements.txt` with the V17.2
+versions and commit them to `main`. Streamlit Community Cloud should redeploy
+the existing Sullivan app automatically.
