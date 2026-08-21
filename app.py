@@ -11,7 +11,7 @@ import stripe
 import requests
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V19.4", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V19.4.1", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -4115,7 +4115,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.4</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.4.1</span></div>",unsafe_allow_html=True)
 
 
 
@@ -5448,79 +5448,439 @@ st.session_state["v19_ui_theme"] = _theme_name
 if _theme_name == "Dark":
     st.markdown("""
     <style>
+    /* =========================================================
+       Sullivan V19.4.1 — complete dark theme
+       ========================================================= */
+
+    :root{
+        --s-bg:#08121F;
+        --s-bg-2:#0B1726;
+        --s-panel:#111F30;
+        --s-panel-2:#15263A;
+        --s-panel-3:#1A2D43;
+        --s-border:#29415A;
+        --s-border-soft:#20364C;
+        --s-text:#F2F6FA;
+        --s-text-2:#D6E0EA;
+        --s-muted:#9FB0C2;
+        --s-blue:#4B9BFF;
+        --s-blue-2:#1E73E8;
+        --s-green:#47D18C;
+        --s-amber:#FFBE55;
+        --s-red:#FF6B75;
+    }
+
     html, body,
     [data-testid="stAppViewContainer"],
     [data-testid="stMain"],
-    .stApp {
-        background:#0C1724 !important;
-        color:#E8F0F7 !important;
+    [data-testid="stMainBlockContainer"],
+    .stApp{
+        background:var(--s-bg)!important;
+        color:var(--s-text)!important;
     }
 
-    [data-testid="stMainBlockContainer"] {
-        background:#0C1724 !important;
+    [data-testid="stHeader"]{
+        background:var(--s-bg)!important;
+        border-bottom:1px solid var(--s-border-soft)!important;
     }
 
-    [data-testid="stSidebar"] {
-        background:#071321 !important;
-        border-right:1px solid #203449 !important;
+    [data-testid="stToolbar"],
+    [data-testid="stDecoration"],
+    [data-testid="stStatusWidget"]{
+        background:transparent!important;
+        color:var(--s-text)!important;
     }
 
-    [data-testid="stSidebar"] * {
-        color:#EAF2F8;
+    [data-testid="stToolbar"] button,
+    [data-testid="stToolbar"] svg{
+        color:var(--s-text-2)!important;
+        fill:currentColor!important;
+        stroke:currentColor!important;
     }
 
-    h1,h2,h3,h4,h5,h6,p,label,span,
-    .stMarkdown,.stCaption,
-    [data-testid="stMetricLabel"],
-    [data-testid="stMetricValue"] {
-        color:#E8F0F7 !important;
+    [data-testid="stSidebar"]{
+        background:#06101D!important;
+        border-right:1px solid var(--s-border-soft)!important;
     }
 
-    .account-strip,.workspace-card,.auth-note,.guest-card,.auth-overlay-card,
-    [data-testid="stMetric"],
-    div[data-testid="stExpander"],
-    div[data-testid="stForm"] {
-        background:#122234 !important;
-        border-color:#29415A !important;
-        color:#E8F0F7 !important;
+    [data-testid="stSidebar"] > div{
+        background:#06101D!important;
     }
 
+    [data-testid="stSidebar"] *{
+        color:var(--s-text-2);
+    }
+
+    /* Global typography */
+    h1,h2,h3,h4,h5,h6,
+    .stMarkdown p,
+    .stMarkdown li,
+    label,
+    [data-testid="stCaptionContainer"],
+    [data-testid="stCaptionContainer"] p{
+        color:var(--s-text)!important;
+    }
+
+    .stCaption,
+    small{
+        color:var(--s-muted)!important;
+    }
+
+    a{
+        color:#75B4FF!important;
+    }
+
+    hr{
+        border-color:var(--s-border-soft)!important;
+    }
+
+    /* Navigation */
+    div[data-baseweb="tab-list"]{
+        border-bottom:1px solid var(--s-border-soft)!important;
+    }
+
+    button[data-baseweb="tab"]{
+        background:transparent!important;
+        border:1px solid transparent!important;
+        box-shadow:none!important;
+        color:#C3D0DD!important;
+    }
+
+    button[data-baseweb="tab"]:hover{
+        background:var(--s-panel)!important;
+        border-color:var(--s-border-soft)!important;
+        color:#FFFFFF!important;
+    }
+
+    button[data-baseweb="tab"][aria-selected="true"]{
+        background:var(--s-panel-2)!important;
+        border-color:var(--s-border)!important;
+        color:#FFFFFF!important;
+    }
+
+    button[data-baseweb="tab"] p{
+        color:inherit!important;
+    }
+
+    /* Inputs / text areas / select boxes */
     div[data-baseweb="input"] > div,
     div[data-baseweb="select"] > div,
+    div[data-baseweb="base-input"] > div,
+    [data-testid="stTextInput"] input,
+    [data-testid="stNumberInput"] input,
+    [data-testid="stTextArea"] textarea,
     textarea,
-    input {
-        background:#0F1D2B !important;
-        color:#F3F7FA !important;
-        -webkit-text-fill-color:#F3F7FA !important;
-        border-color:#36516D !important;
+    input{
+        background:#0C1A29!important;
+        color:#F5F8FB!important;
+        -webkit-text-fill-color:#F5F8FB!important;
+        border-color:#35516D!important;
+        caret-color:#FFFFFF!important;
     }
 
-    div[data-baseweb="select"] svg,
-    button svg {
-        fill:currentColor;
+    input::placeholder,
+    textarea::placeholder{
+        color:#7F94A8!important;
+        -webkit-text-fill-color:#7F94A8!important;
+        opacity:1!important;
     }
 
-    button[data-baseweb="tab"]:not([aria-selected="true"]) {
-        background:#122234 !important;
-        color:#C7D6E4 !important;
+    div[data-baseweb="select"] span,
+    div[data-baseweb="select"] input,
+    [role="combobox"]{
+        color:#F5F8FB!important;
+        -webkit-text-fill-color:#F5F8FB!important;
     }
 
-    button[data-baseweb="tab"][aria-selected="true"] {
-        background:#1769E0 !important;
-        color:#FFFFFF !important;
+    div[data-baseweb="popover"],
+    div[data-baseweb="menu"],
+    ul[role="listbox"]{
+        background:var(--s-panel-2)!important;
+        border-color:var(--s-border)!important;
+        color:var(--s-text)!important;
     }
 
+    li[role="option"]{
+        background:var(--s-panel-2)!important;
+        color:var(--s-text)!important;
+    }
+
+    li[role="option"]:hover{
+        background:#203852!important;
+    }
+
+    /* Buttons */
+    div.stButton > button,
+    button[kind="secondary"],
+    button[kind="tertiary"]{
+        background:var(--s-panel-2)!important;
+        color:#F3F7FA!important;
+        border:1px solid #35516D!important;
+        box-shadow:none!important;
+    }
+
+    div.stButton > button:hover,
+    button[kind="secondary"]:hover,
+    button[kind="tertiary"]:hover{
+        background:#203852!important;
+        color:#FFFFFF!important;
+        border-color:#4B9BFF!important;
+    }
+
+    button[kind="primary"]{
+        background:#1E73E8!important;
+        color:#FFFFFF!important;
+        border-color:#1E73E8!important;
+    }
+
+    button[kind="primary"]:hover{
+        background:#2E83F6!important;
+        border-color:#2E83F6!important;
+    }
+
+    /* Checkbox, toggle, radio */
+    [data-testid="stCheckbox"] label,
+    [data-testid="stRadio"] label,
+    [data-testid="stToggle"] label{
+        color:var(--s-text-2)!important;
+    }
+
+    /* Expanders / forms / common app cards */
+    .account-strip,
+    .workspace-card,
+    .auth-note,
+    .guest-card,
+    .auth-overlay-card,
+    .auth-card,
+    .s15-system-card,
+    div[data-testid="stExpander"],
+    details[data-testid="stExpander"],
+    div[data-testid="stForm"]{
+        background:var(--s-panel)!important;
+        border-color:var(--s-border)!important;
+        color:var(--s-text)!important;
+        box-shadow:none!important;
+    }
+
+    div[data-testid="stExpander"] summary,
+    details[data-testid="stExpander"] summary{
+        color:var(--s-text)!important;
+    }
+
+    /* Home hero — darken the image instead of leaving a white wash */
+    .hero-v15{
+        position:relative!important;
+        border-color:var(--s-border)!important;
+        box-shadow:0 10px 28px rgba(0,0,0,.28)!important;
+        isolation:isolate!important;
+    }
+
+    .hero-v15::before{
+        content:"";
+        position:absolute;
+        inset:0;
+        z-index:-1;
+        border-radius:inherit;
+        background:linear-gradient(
+            90deg,
+            rgba(5,14,24,.96) 0%,
+            rgba(5,14,24,.86) 42%,
+            rgba(5,14,24,.48) 76%,
+            rgba(5,14,24,.30) 100%
+        );
+        pointer-events:none;
+    }
+
+    .hero-v15 h1{
+        color:#F6FAFD!important;
+        text-shadow:0 1px 4px rgba(0,0,0,.25);
+    }
+
+    .hero-v15 p{
+        color:#C9D7E4!important;
+    }
+
+    .hero-kicker{
+        color:#71B5FF!important;
+    }
+
+    .hero-chip{
+        background:rgba(13,29,45,.90)!important;
+        border-color:#35516D!important;
+        color:#E8F0F7!important;
+        box-shadow:none!important;
+    }
+
+    .hero-chip span{
+        color:#E8F0F7!important;
+    }
+
+    /* Home KPI cards */
+    .kpi-v15{
+        background:var(--s-panel)!important;
+        border-color:var(--s-border)!important;
+        box-shadow:0 7px 20px rgba(0,0,0,.16)!important;
+    }
+
+    .kpi-head{
+        color:#DDE7F0!important;
+    }
+
+    .kpi-sub{
+        color:var(--s-muted)!important;
+    }
+
+    /* Keep KPI accent values colorful but readable */
+    .kpi-value{
+        filter:saturate(.92) brightness(1.16);
+    }
+
+    /* Home panels and activity */
+    .section-heading{
+        color:#EAF1F7!important;
+    }
+
+    .panel-v15{
+        background:var(--s-panel)!important;
+        border-color:var(--s-border)!important;
+        box-shadow:0 7px 20px rgba(0,0,0,.16)!important;
+    }
+
+    .list-row,
+    .activity-v15{
+        border-bottom-color:var(--s-border-soft)!important;
+    }
+
+    .list-copy b,
+    .empty-state{
+        color:#E6EEF5!important;
+    }
+
+    .list-copy span,
+    .empty-state span,
+    .activity-amount span,
+    .quick-labels span{
+        color:var(--s-muted)!important;
+    }
+
+    /* Native Streamlit metrics */
+    [data-testid="stMetric"]{
+        background:var(--s-panel)!important;
+        border:1px solid var(--s-border)!important;
+        box-shadow:none!important;
+    }
+
+    [data-testid="stMetricLabel"],
+    [data-testid="stMetricLabel"] *{
+        color:#AFC0D0!important;
+    }
+
+    [data-testid="stMetricValue"],
+    [data-testid="stMetricValue"] *{
+        color:#F4F8FB!important;
+    }
+
+    [data-testid="stMetricDelta"],
+    [data-testid="stMetricDelta"] *{
+        color:#BFD0DF!important;
+    }
+
+    /* Alerts */
+    [data-testid="stAlert"]{
+        border:1px solid var(--s-border)!important;
+        color:var(--s-text)!important;
+    }
+
+    [data-testid="stAlert"] p,
+    [data-testid="stAlert"] span{
+        color:inherit!important;
+    }
+
+    /* Dataframes / tables */
     [data-testid="stDataFrame"],
-    [data-testid="stTable"] {
-        background:#101F2F !important;
+    [data-testid="stTable"],
+    [data-testid="stDataFrameResizable"]{
+        background:var(--s-panel)!important;
+        border-color:var(--s-border)!important;
+        color:var(--s-text)!important;
     }
 
-    hr {
-        border-color:#29415A !important;
+    /* File uploader / widgets */
+    [data-testid="stFileUploaderDropzone"]{
+        background:var(--s-panel)!important;
+        border-color:#35516D!important;
     }
 
-    a {
-        color:#6EAEFF !important;
+    [data-testid="stFileUploaderDropzone"] *{
+        color:var(--s-text-2)!important;
+    }
+
+    /* Code and JSON */
+    pre,
+    code,
+    [data-testid="stCodeBlock"]{
+        background:#07111D!important;
+        color:#DDE9F3!important;
+        border-color:var(--s-border)!important;
+    }
+
+    /* Sidebar cards and workspace controls */
+    .account-strip,
+    .workspace-card{
+        background:#102237!important;
+        border-color:#2D4862!important;
+    }
+
+    .account-strip b,
+    .workspace-card h4,
+    .workspace-card label,
+    .workspace-card p{
+        color:#F4F8FB!important;
+    }
+
+    .account-strip span,
+    .workspace-card .stCaption{
+        color:#B5C5D4!important;
+    }
+
+    /* Settings page */
+    [data-testid="stVerticalBlockBorderWrapper"]{
+        border-color:var(--s-border)!important;
+    }
+
+    /* Footer */
+    .footer-v15{
+        background:#050D17!important;
+        border:1px solid var(--s-border-soft)!important;
+        color:#BFD0DF!important;
+    }
+
+    .footer-v15 b{
+        color:#FFFFFF!important;
+    }
+
+    .footer-v15 small{
+        color:#8FA6BA!important;
+    }
+
+    /* Scrollbars */
+    ::-webkit-scrollbar{
+        width:10px;
+        height:10px;
+    }
+
+    ::-webkit-scrollbar-track{
+        background:#08121F;
+    }
+
+    ::-webkit-scrollbar-thumb{
+        background:#2D455C;
+        border-radius:999px;
+        border:2px solid #08121F;
+    }
+
+    ::-webkit-scrollbar-thumb:hover{
+        background:#3B5873;
     }
     </style>
     """, unsafe_allow_html=True)
