@@ -11,7 +11,7 @@ import stripe
 import requests
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V19.4.5", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V19.4.6", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -4115,7 +4115,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.4.5</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.4.6</span></div>",unsafe_allow_html=True)
 
 
 
@@ -6864,21 +6864,28 @@ with home_tabs[0]:
                 )
             )
 
-            # V19.4.5: relaxed, stock-chart-style cash outlook.
-            # One primary balance line, soft area fill, subtle cash-movement markers,
-            # tight 30-day date range, and a focused y-axis around the actual balance.
-            cash_only = melted[melted["Series"] == "Cash balance"].copy()
-            cash_only = cash_only.sort_values("date")
+            # V19.4.6: polished Sullivan dashboard cash outlook.
+            # Visual direction: a stock-style blue balance line with soft fill,
+            # plus restrained green/red vertical movement bars like the dashboard mockup.
+            cash_only = melted[melted["Series"] == "Cash balance"].copy().sort_values("date")
 
             balance_min = float(cash_only["Amount"].min()) if not cash_only.empty else 0.0
             balance_max = float(cash_only["Amount"].max()) if not cash_only.empty else 0.0
-            balance_span = max(balance_max - balance_min, abs(balance_max) * 0.04, 100.0)
-            y_pad = max(balance_span * 0.30, 100.0)
+            balance_span = max(balance_max - balance_min, abs(balance_max) * 0.05, 150.0)
+            y_pad = max(balance_span * 0.24, 125.0)
             y_min = balance_min - y_pad
             y_max = balance_max + y_pad
 
             date_min = cash_only["date"].min() if not cash_only.empty else forecast["date"].min()
             date_max = cash_only["date"].max() if not cash_only.empty else forecast["date"].max()
+
+            is_dark = st.session_state.get("v19_ui_theme") == "Dark"
+            chart_bg = "#0D1A2A" if is_dark else "#FFFFFF"
+            axis_text = "#AFC0D0" if is_dark else "#63788C"
+            grid_color = "#28405A" if is_dark else "#E7EEF5"
+            blue = "#2F80ED"
+            green = "#27C96F"
+            red = "#F04452"
 
             stock_base = alt.Chart(cash_only).encode(
                 x=alt.X(
@@ -6889,8 +6896,8 @@ with home_tabs[0]:
                         format="%b %d",
                         labelColor=axis_text,
                         labelAngle=0,
-                        labelPadding=12,
-                        tickCount=6,
+                        labelPadding=11,
+                        tickCount=7,
                         tickColor=grid_color,
                         domain=False,
                         grid=False
@@ -6909,21 +6916,23 @@ with home_tabs[0]:
                         domain=False,
                         grid=True,
                         gridColor=grid_color,
-                        gridOpacity=0.22
+                        gridOpacity=0.26
                     )
                 )
             )
 
+            # Soft stock-chart fill.
             cash_area = stock_base.mark_area(
                 interpolate="monotone",
-                color="#4B9BFF",
-                opacity=0.10
+                color=blue,
+                opacity=0.16
             )
 
+            # Main projected-balance line.
             cash_line = stock_base.mark_line(
                 interpolate="monotone",
-                color="#4B9BFF",
-                strokeWidth=3.0,
+                color=blue,
+                strokeWidth=3.2,
                 strokeCap="round",
                 strokeJoin="round"
             ).encode(
@@ -6933,22 +6942,28 @@ with home_tabs[0]:
                 ]
             )
 
-            # Subtle markers for days where money is expected to move.
-            inflow_days = forecast[forecast["Money in"] > 0].copy()
-            outflow_days = forecast[forecast["Money out"] > 0].copy()
+            # Movement bars sit around the balance line instead of competing as extra lines.
+            movement = forecast.copy()
+            movement["in_base"] = movement["Cash balance"]
+            movement["in_top"] = movement["Cash balance"] + movement["Money in"].clip(lower=0)
+            movement["out_base"] = movement["Cash balance"]
+            movement["out_bottom"] = movement["Cash balance"] - movement["Money out"].clip(lower=0)
 
-            inflow_marks = alt.Chart(inflow_days).mark_circle(
-                size=52,
-                color="#34C978",
-                opacity=0.90,
-                stroke=chart_bg,
-                strokeWidth=1.5
+            inflow_days = movement[movement["Money in"] > 0].copy()
+            outflow_days = movement[movement["Money out"] > 0].copy()
+
+            inflow_bars = alt.Chart(inflow_days).mark_rule(
+                color=green,
+                strokeWidth=6,
+                strokeCap="round",
+                opacity=0.85
             ).encode(
                 x=alt.X("date:T", scale=alt.Scale(domain=[date_min, date_max])),
                 y=alt.Y(
-                    "Cash balance:Q",
+                    "in_base:Q",
                     scale=alt.Scale(domain=[y_min, y_max], zero=False)
                 ),
+                y2="in_top:Q",
                 tooltip=[
                     alt.Tooltip("date:T", title="Date", format="%b %d, %Y"),
                     alt.Tooltip("Money in:Q", title="Money expected in", format="$,.2f"),
@@ -6956,18 +6971,18 @@ with home_tabs[0]:
                 ]
             )
 
-            outflow_marks = alt.Chart(outflow_days).mark_circle(
-                size=52,
-                color="#FF6673",
-                opacity=0.90,
-                stroke=chart_bg,
-                strokeWidth=1.5
+            outflow_bars = alt.Chart(outflow_days).mark_rule(
+                color=red,
+                strokeWidth=6,
+                strokeCap="round",
+                opacity=0.85
             ).encode(
                 x=alt.X("date:T", scale=alt.Scale(domain=[date_min, date_max])),
                 y=alt.Y(
-                    "Cash balance:Q",
+                    "out_base:Q",
                     scale=alt.Scale(domain=[y_min, y_max], zero=False)
                 ),
+                y2="out_bottom:Q",
                 tooltip=[
                     alt.Tooltip("date:T", title="Date", format="%b %d, %Y"),
                     alt.Tooltip("Money out:Q", title="Bills expected out", format="$,.2f"),
@@ -6982,25 +6997,23 @@ with home_tabs[0]:
                 empty=False
             )
 
-            selector = alt.Chart(cash_only).mark_point(
-                opacity=0
-            ).encode(
+            selector = alt.Chart(cash_only).mark_point(opacity=0).encode(
                 x="date:T"
             ).add_params(nearest_cash)
 
             hover_rule = alt.Chart(cash_only).mark_rule(
-                color="#8CA0B4",
-                opacity=0.45,
+                color="#7F94A8",
+                opacity=0.42,
                 strokeWidth=1
             ).encode(
                 x="date:T"
             ).transform_filter(nearest_cash)
 
             hover_dot = stock_base.mark_circle(
-                size=78,
-                color="#4B9BFF",
+                size=82,
+                color=blue,
                 stroke="#FFFFFF",
-                strokeWidth=1.6
+                strokeWidth=1.5
             ).encode(
                 opacity=alt.condition(nearest_cash, alt.value(1), alt.value(0)),
                 tooltip=[
@@ -7011,26 +7024,51 @@ with home_tabs[0]:
 
             chart = (
                 cash_area
+                + inflow_bars
+                + outflow_bars
                 + cash_line
-                + inflow_marks
-                + outflow_marks
                 + selector
                 + hover_rule
                 + hover_dot
             ).properties(
-                height=300,
+                height=335,
                 background=chart_bg,
-                padding={"left": 4, "right": 10, "top": 12, "bottom": 4}
+                padding={"left": 8, "right": 14, "top": 14, "bottom": 8}
             ).configure_view(
-                stroke=None
+                stroke=grid_color,
+                strokeWidth=1,
+                cornerRadius=12
             ).configure_axis(
                 labelFontSize=11
             )
 
+            # Small legend chips above the chart, matching the visual mockup.
+            legend_bg = "#112239" if is_dark else "#F6F9FC"
+            legend_text = "#EAF2F8" if is_dark else "#31475C"
+            st.markdown(
+                f"""
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin:2px 0 10px 0;">
+                    <span style="background:{legend_bg};border:1px solid {grid_color};color:{legend_text};
+                                 padding:6px 10px;border-radius:999px;font-size:.78rem;font-weight:600;">
+                        <span style="color:{blue};">◆</span>&nbsp; Projected balance
+                    </span>
+                    <span style="background:{legend_bg};border:1px solid {grid_color};color:{legend_text};
+                                 padding:6px 10px;border-radius:999px;font-size:.78rem;font-weight:600;">
+                        <span style="color:{green};">●</span>&nbsp; Money in
+                    </span>
+                    <span style="background:{legend_bg};border:1px solid {grid_color};color:{legend_text};
+                                 padding:6px 10px;border-radius:999px;font-size:.78rem;font-weight:600;">
+                        <span style="color:{red};">●</span>&nbsp; Money out
+                    </span>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
             st.altair_chart(chart, width="stretch")
             st.caption(
-                "Projected bank balance for the next 30 days. "
-                "Green dots = expected money in • Red dots = expected bills out • Hover for exact values."
+                "Estimated 30-day outlook based on your current balance, scheduled invoices, and upcoming bills. "
+                "Hover over the chart for exact values."
             )
         except Exception:
             st.line_chart(forecast.set_index("date")[["Cash balance"]],height=285)
