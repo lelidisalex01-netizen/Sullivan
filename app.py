@@ -13,7 +13,7 @@ import stripe
 import requests
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V20", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V20.0.1", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -4157,7 +4157,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V20</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V20.0.1</span></div>",unsafe_allow_html=True)
 
 
 
@@ -6790,7 +6790,7 @@ def v20_render_finance():
             with c3:
                 maturity_date = st.date_input(
                     "Maturity date (optional estimate)",
-                    value=date.today() + relativedelta(months=int(term_months or 0)),
+                    value=(pd.Timestamp(date.today()) + pd.DateOffset(months=int(term_months or 0))).date(),
                     key="v20_fin_maturity"
                 )
                 collateral = st.text_input(
