@@ -1,4 +1,5 @@
 import os, re, sqlite3, hashlib, json, zipfile, shutil, uuid, secrets, hmac, base64
+import textwrap
 from pathlib import Path
 from typing import Optional
 from datetime import date, datetime, timedelta
@@ -11,7 +12,7 @@ import stripe
 import requests
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V19.5", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V19.5.1", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -4115,7 +4116,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.5</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.5.1</span></div>",unsafe_allow_html=True)
 
 
 
@@ -6953,7 +6954,7 @@ with home_tabs[0]:
             end_x, end_y = pts[-1]
 
             st.markdown(
-                f"""
+                textwrap.dedent(f"""
                 <div style="
                     background:{card_bg};
                     border:1px solid {border};
@@ -7066,7 +7067,7 @@ with home_tabs[0]:
                         <span style="margin-left:auto;">Hover over transaction points for details</span>
                     </div>
                 </div>
-                """,
+                """).strip(),
                 unsafe_allow_html=True
             )
 
