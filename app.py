@@ -13,7 +13,7 @@ import stripe
 import requests
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V19.5.2", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V19.6", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -4117,7 +4117,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.5.2</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V19.6</span></div>",unsafe_allow_html=True)
 
 
 
@@ -6188,6 +6188,170 @@ if _theme_name == "Dark":
     """, unsafe_allow_html=True)
 
 
+
+# ============================================================
+# V19.6 — FREE SULLIVAN AI HELP
+# ============================================================
+def v196_support_ai(question):
+    """
+    Built-in Sullivan product support.
+    IMPORTANT: this intentionally does NOT call v18_require_ai_credits(),
+    v18_consume_ai_credits(), or v18_log_ai_usage(), so support questions
+    never consume the customer's normal Sullivan AI points.
+    """
+    q = str(question or "").strip()
+    if not q:
+        return "Tell me what you're trying to do in Sullivan and I'll walk you through it."
+
+    if not key():
+        return "Sullivan AI Help is not configured on this server yet."
+
+    support_instructions = """
+You are Sullivan AI Help, the built-in customer support assistant for Sullivan Accounting.
+
+Help the user operate Sullivan clearly and quickly. Focus on Sullivan product support:
+dashboard navigation, importing transactions, transaction categorization, Question Queue,
+General Ledger, Manual Journals, customers, vendors, estimates, invoices, credit notes,
+bills, payments, AR/AP, reconciliation, Smart Close, Tax Center, Accounting Periods,
+reports, Personal vs Company workspaces, switching workspaces, workspace settings,
+subscriptions, AI usage, and interface settings.
+
+Rules:
+1. Give short, practical, step-by-step instructions.
+2. Never claim an action happened unless the user says it happened.
+3. If you are not sure of an exact Sullivan button or location, say so instead of inventing it.
+4. Never ask for passwords, API keys, secret keys, full card numbers, or bank credentials.
+5. You may explain basic bookkeeping concepts needed to use Sullivan.
+6. Do not present product support as professional legal, tax, or accounting advice.
+7. For consequential tax/legal/accounting decisions, explain the Sullivan workflow and tell
+   the user to confirm the underlying professional decision with a qualified professional.
+8. Sullivan AI Help is free support. Never tell the user that this support chat uses or
+   deducts their normal Sullivan AI points.
+"""
+
+    try:
+        client = OpenAI(api_key=key())
+        response = client.responses.create(
+            model=MODEL,
+            instructions=support_instructions,
+            input=q,
+            max_output_tokens=700,
+        )
+        answer = getattr(response, "output_text", None)
+        if answer:
+            return answer.strip()
+
+        # Defensive fallback for SDK response variants.
+        try:
+            pieces = []
+            for item in response.output:
+                for content in getattr(item, "content", []):
+                    txt = getattr(content, "text", None)
+                    if txt:
+                        pieces.append(str(txt))
+            if pieces:
+                return "\n".join(pieces).strip()
+        except Exception:
+            pass
+
+        return "I couldn't generate a support answer. Please try rephrasing the question."
+    except Exception as e:
+        return f"Sullivan AI Help couldn't connect right now. Please try again. ({type(e).__name__})"
+
+
+def v196_render_support_ai():
+    st.markdown("#### ✨ Ask Sullivan AI")
+    st.write(
+        "Get free help using Sullivan — transactions, invoices, reconciliation, "
+        "workspaces, reports, settings, and more."
+    )
+    st.success("Free support: questions here do **not** use your normal Sullivan AI points.")
+
+    if "v196_support_messages" not in st.session_state:
+        st.session_state["v196_support_messages"] = []
+
+    st.caption("Quick help")
+    q1, q2, q3 = st.columns(3)
+    quick = None
+
+    with q1:
+        if st.button(
+            "Import transactions",
+            key="v196_quick_import",
+            width="stretch"
+        ):
+            quick = "How do I import transactions into Sullivan?"
+
+    with q2:
+        if st.button(
+            "Reconcile an account",
+            key="v196_quick_reconcile",
+            width="stretch"
+        ):
+            quick = "How do I reconcile an account in Sullivan?"
+
+    with q3:
+        if st.button(
+            "Personal vs Company",
+            key="v196_quick_workspace",
+            width="stretch"
+        ):
+            quick = (
+                "Explain the difference between Personal and Company workspaces "
+                "in Sullivan and how I safely switch between them."
+            )
+
+    for message in st.session_state["v196_support_messages"][-10:]:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    typed = st.chat_input(
+        "Ask Sullivan AI for help…",
+        key="v196_support_chat_input"
+    )
+    question = quick or typed
+
+    if question:
+        st.session_state["v196_support_messages"].append(
+            {"role": "user", "content": question}
+        )
+
+        with st.chat_message("user"):
+            st.markdown(question)
+
+        with st.chat_message("assistant"):
+            with st.spinner("Sullivan AI is helping…"):
+                answer = v196_support_ai(question)
+            st.markdown(answer)
+
+        st.session_state["v196_support_messages"].append(
+            {"role": "assistant", "content": answer}
+        )
+
+    if st.session_state["v196_support_messages"]:
+        if st.button(
+            "Clear support chat",
+            key="v196_clear_support_chat",
+            width="content"
+        ):
+            st.session_state["v196_support_messages"] = []
+            st.rerun()
+
+    st.caption(
+        "Human email support can be added later. For now, Sullivan AI handles simple product-help questions for free."
+    )
+
+
+
+
+with st.sidebar:
+    st.markdown("---")
+    st.markdown("### ✨ Free AI Help")
+    st.caption(
+        "Need help using Sullivan? Open **Settings → Help & Support**. "
+        "Support questions do not use your normal AI points."
+    )
+
 main_sections=st.tabs(["Home","Money In","Money Out","Bank","Taxes","Reports","Team","Plan & AI","Advanced","Settings"])
 
 
@@ -6663,25 +6827,13 @@ with main_sections[9]:
 
         with support_tab:
             st.markdown("### Help & Support")
-
-            support_email = _secret_value("SULLIVAN_SUPPORT_EMAIL", "")
-            if support_email:
-                st.write(f"**Customer service email:** {support_email}")
-            else:
-                st.info(
-                    "Customer service email has not been configured yet. "
-                    "When you're ready, add `SULLIVAN_SUPPORT_EMAIL` to Streamlit Secrets."
-                )
-
-            st.markdown("#### Help desk")
-            st.write(
-                "Use this area for billing questions, account access, workspace issues, "
-                "bug reports, and help using Sullivan."
-            )
             st.caption(
-                "A future Sullivan help-desk system can create support tickets directly from this page."
+                "Start with Sullivan AI for fast product help. Human support can be added later as Sullivan grows."
             )
 
+            v196_render_support_ai()
+
+            st.divider()
             st.markdown("#### Useful account information")
             st.code(
                 f"Sullivan User ID: {settings_user.get('user_code','')}\n"
