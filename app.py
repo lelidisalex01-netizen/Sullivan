@@ -13,7 +13,7 @@ import stripe
 import requests
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V20.0.1", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V20.1", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -215,6 +215,8 @@ WORKSPACE_ACCOUNTING_TABLES = (
     "accounting_periods",
     "financing_accounts",
     "financing_payments",
+    "business_assets",
+    "equity_transactions",
 )
 
 SHARED_SULLIVAN_TABLES = (
@@ -496,6 +498,33 @@ def init_db():
         posted_to_ledger INTEGER DEFAULT 0,
         created_at TEXT NOT NULL,
         FOREIGN KEY(financing_id) REFERENCES financing_accounts(id) ON DELETE CASCADE
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS business_assets(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        asset_name TEXT NOT NULL,
+        asset_type TEXT NOT NULL DEFAULT 'Equipment',
+        purchase_date TEXT,
+        purchase_price REAL NOT NULL DEFAULT 0,
+        salvage_value REAL NOT NULL DEFAULT 0,
+        useful_life_years REAL NOT NULL DEFAULT 5,
+        depreciation_method TEXT DEFAULT 'Straight-line',
+        financing_id INTEGER,
+        identifier TEXT,
+        location TEXT,
+        notes TEXT,
+        status TEXT DEFAULT 'Active',
+        disposal_date TEXT,
+        disposal_amount REAL DEFAULT 0,
+        created_at TEXT NOT NULL
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS equity_transactions(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        transaction_date TEXT NOT NULL,
+        equity_type TEXT NOT NULL,
+        owner_name TEXT,
+        amount REAL NOT NULL DEFAULT 0,
+        memo TEXT,
+        created_at TEXT NOT NULL
         )""")
 
         # V10.7 migration for databases created by earlier versions.
@@ -4157,7 +4186,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V20.0.1</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V20.1</span></div>",unsafe_allow_html=True)
 
 
 
@@ -6582,6 +6611,180 @@ def v20_finance_summary():
     }
 
 
+
+def v201_asset_book_value(row, as_of=None):
+    as_of = as_of or date.today()
+    cost = float(row.get("purchase_price", 0) or 0)
+    salvage = max(0.0, float(row.get("salvage_value", 0) or 0))
+    life = max(0.01, float(row.get("useful_life_years", 5) or 5))
+    try:
+        purchased = pd.to_datetime(row.get("purchase_date")).date()
+    except Exception:
+        return cost, 0.0
+    end_date = as_of
+    if str(row.get("status","Active")) == "Disposed" and row.get("disposal_date"):
+        try: end_date = min(end_date, pd.to_datetime(row.get("disposal_date")).date())
+        except Exception: pass
+    elapsed_years = max(0.0, (end_date - purchased).days / 365.25)
+    depreciable = max(0.0, cost - salvage)
+    accumulated = min(depreciable, depreciable * min(elapsed_years / life, 1.0))
+    return max(salvage, cost - accumulated), accumulated
+
+
+def v201_render_assets_equity():
+    st.subheader("Assets & Equity")
+    st.caption("Track what the business owns, what it is worth on the books, and how owners fund or withdraw from the business.")
+
+    if not v171_is_signed_in():
+        st.info("Sign in to manage business assets and ownership activity.")
+        return
+
+    assets = read("SELECT * FROM business_assets ORDER BY status, purchase_date DESC, id DESC")
+    equity = read("SELECT * FROM equity_transactions ORDER BY transaction_date DESC, id DESC")
+
+    total_cost = 0.0
+    total_book = 0.0
+    total_depr = 0.0
+    active_assets = 0
+    if not assets.empty:
+        for _, r in assets.iterrows():
+            if str(r.get("status","Active")) != "Disposed":
+                active_assets += 1
+                total_cost += float(r.get("purchase_price",0) or 0)
+                bv, dep = v201_asset_book_value(r)
+                total_book += bv
+                total_depr += dep
+
+    contributions = 0.0
+    withdrawals = 0.0
+    shareholder_loans = 0.0
+    if not equity.empty:
+        for _, r in equity.iterrows():
+            typ = str(r.get("equity_type",""))
+            amt = float(r.get("amount",0) or 0)
+            if typ in ("Owner Contribution","Share Capital"): contributions += amt
+            elif typ in ("Owner Draw / Distribution","Dividend / Distribution"): withdrawals += amt
+            elif typ == "Shareholder Loan": shareholder_loans += amt
+
+    c1,c2,c3,c4 = st.columns(4)
+    c1.metric("Asset book value", f"${total_book:,.2f}")
+    c2.metric("Active assets", f"{active_assets:,}")
+    c3.metric("Accumulated depreciation", f"${total_depr:,.2f}")
+    c4.metric("Net owner funding", f"${(contributions-withdrawals):,.2f}")
+
+    tabs = st.tabs(["Asset Register","Add Asset","Equity & Ownership","Add Equity Activity"])
+
+    with tabs[0]:
+        if assets.empty:
+            st.info("No assets recorded yet. Add equipment, vehicles, property, computers, machinery, investments, or other capital assets.")
+        else:
+            rows=[]
+            for _,r in assets.iterrows():
+                bv,dep=v201_asset_book_value(r)
+                rows.append({
+                    "Asset":r["asset_name"],"Type":r["asset_type"],"Purchased":r["purchase_date"],
+                    "Cost":float(r["purchase_price"] or 0),"Book value":bv,
+                    "Accum. depreciation":dep,"Status":r["status"],
+                    "Identifier":r.get("identifier") or ""
+                })
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+            options={f'#{int(r["id"])} · {r["asset_name"]}':int(r["id"]) for _,r in assets.iterrows()}
+            chosen=st.selectbox("Manage an asset",[""]+list(options.keys()),key="v201_manage_asset")
+            if chosen:
+                aid=options[chosen]
+                ar=assets[assets["id"]==aid].iloc[0]
+                x1,x2=st.columns(2)
+                with x1:
+                    new_name=st.text_input("Asset name",value=str(ar["asset_name"]),key=f"v201_an_{aid}")
+                    new_loc=st.text_input("Location",value=str(ar.get("location") or ""),key=f"v201_al_{aid}")
+                with x2:
+                    new_id=st.text_input("Serial / VIN / property ID",value=str(ar.get("identifier") or ""),key=f"v201_ai_{aid}")
+                    new_status=st.selectbox("Status",["Active","Disposed"],index=0 if ar["status"]!="Disposed" else 1,key=f"v201_as_{aid}")
+                if st.button("Save asset changes",type="primary",key=f"v201_save_{aid}"):
+                    write(lambda c:c.execute("UPDATE business_assets SET asset_name=?,location=?,identifier=?,status=? WHERE id=?",
+                                             (new_name.strip(),new_loc.strip(),new_id.strip(),new_status,aid)))
+                    st.success("Asset updated.")
+                    st.rerun()
+
+    with tabs[1]:
+        with st.form("v201_add_asset"):
+            a1,a2=st.columns(2)
+            with a1:
+                name=st.text_input("Asset name *")
+                typ=st.selectbox("Asset type",["Equipment","Vehicle","Property / Building","Computer / Technology","Machinery","Furniture","Investment","Leasehold Improvement","Other"])
+                purchased=st.date_input("Purchase date",value=date.today())
+                cost=st.number_input("Purchase price",min_value=0.0,step=100.0,format="%.2f")
+                salvage=st.number_input("Expected salvage value",min_value=0.0,step=100.0,format="%.2f")
+            with a2:
+                life=st.number_input("Useful life (years)",min_value=0.5,max_value=100.0,value=5.0,step=0.5)
+                method=st.selectbox("Depreciation method",["Straight-line"])
+                identifier=st.text_input("Serial / VIN / property ID")
+                location=st.text_input("Location")
+                notes=st.text_area("Notes")
+            financing=read("SELECT id,name FROM financing_accounts WHERE status='Active' ORDER BY name")
+            fopts={"Not financed / no link":None}
+            if not financing.empty:
+                fopts.update({str(r["name"]):int(r["id"]) for _,r in financing.iterrows()})
+            flink=st.selectbox("Linked financing account",list(fopts.keys()))
+            submitted=st.form_submit_button("Add asset",type="primary")
+            if submitted:
+                if not name.strip():
+                    st.error("Enter an asset name.")
+                elif salvage > cost:
+                    st.error("Salvage value cannot be greater than purchase price.")
+                else:
+                    now=datetime.now().isoformat(timespec="seconds")
+                    write(lambda c:c.execute("""INSERT INTO business_assets(
+                        asset_name,asset_type,purchase_date,purchase_price,salvage_value,useful_life_years,
+                        depreciation_method,financing_id,identifier,location,notes,status,created_at)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (name.strip(),typ,purchased.isoformat(),cost,salvage,life,method,fopts[flink],
+                         identifier.strip(),location.strip(),notes.strip(),"Active",now)))
+                    st.success("Asset added to this workspace.")
+                    st.rerun()
+
+    with tabs[2]:
+        e1,e2,e3=st.columns(3)
+        e1.metric("Contributions / share capital",f"${contributions:,.2f}")
+        e2.metric("Draws / distributions",f"${withdrawals:,.2f}")
+        e3.metric("Shareholder loans",f"${shareholder_loans:,.2f}")
+        st.caption("Net owner funding is contributions and share capital less owner draws/distributions. Shareholder loans are shown separately because they may be liabilities rather than equity.")
+        if equity.empty:
+            st.info("No ownership activity recorded yet.")
+        else:
+            show=equity.rename(columns={
+                "transaction_date":"Date","equity_type":"Activity","owner_name":"Owner / shareholder",
+                "amount":"Amount","memo":"Memo"
+            })[["Date","Activity","Owner / shareholder","Amount","Memo"]]
+            st.dataframe(show,width="stretch",hide_index=True)
+
+    with tabs[3]:
+        with st.form("v201_add_equity"):
+            q1,q2=st.columns(2)
+            with q1:
+                edate=st.date_input("Date",value=date.today(),key="v201_eq_date")
+                etype=st.selectbox("Activity type",[
+                    "Owner Contribution","Share Capital","Owner Draw / Distribution",
+                    "Dividend / Distribution","Shareholder Loan","Retained Earnings Adjustment"
+                ])
+            with q2:
+                owner=st.text_input("Owner / shareholder")
+                amount=st.number_input("Amount",min_value=0.0,step=100.0,format="%.2f",key="v201_eq_amt")
+            memo=st.text_area("Memo",key="v201_eq_memo")
+            save=st.form_submit_button("Record ownership activity",type="primary")
+            if save:
+                if amount <= 0:
+                    st.error("Enter an amount greater than zero.")
+                else:
+                    now=datetime.now().isoformat(timespec="seconds")
+                    write(lambda c:c.execute("""INSERT INTO equity_transactions(
+                        transaction_date,equity_type,owner_name,amount,memo,created_at)
+                        VALUES(?,?,?,?,?,?)""",
+                        (edate.isoformat(),etype,owner.strip(),amount,memo.strip(),now)))
+                    st.success("Ownership activity recorded.")
+                    st.rerun()
+
 def v20_render_finance():
     st.subheader("Business Finance")
     st.caption(
@@ -7363,7 +7566,11 @@ with main_sections[4]:
 with main_sections[5]:
     report_tabs=st.tabs(["Financial Reports","Money Owed / Bills Owed"])
 with main_sections[6]:
-    v20_render_finance()
+    finance_sections=st.tabs(["Debt & Financing","Assets & Equity"])
+    with finance_sections[0]:
+        v20_render_finance()
+    with finance_sections[1]:
+        v201_render_assets_equity()
 
 with main_sections[7]:
     st.subheader("Team")
