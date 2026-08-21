@@ -13,7 +13,7 @@ import stripe
 import requests
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V20.2", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V20.2.1", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -4186,7 +4186,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V20.2</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V20.2.1</span></div>",unsafe_allow_html=True)
 
 
 
@@ -7025,6 +7025,180 @@ def v202_build_insights(snapshot):
     return insights[:6]
 
 
+
+def v202_render_stock_style_trend(trend_df, is_dark):
+    """Dashboard-style trend chart matching Sullivan's main Cash Activity visual language."""
+    if trend_df is None or trend_df.empty:
+        st.info("Not enough history to build a trend yet.")
+        return
+
+    card_bg = "#102338" if is_dark else "#FFFFFF"
+    plot_bg = "#0A1828" if is_dark else "#F4F9FD"
+    border = "#294763" if is_dark else "#DCE8F2"
+    grid = "#29445E" if is_dark else "#DCE8F2"
+    text_main = "#F7FBFF" if is_dark else "#102A43"
+    text_muted = "#9FB4C8" if is_dark else "#718499"
+
+    series = [
+        ("Revenue", "#2F80ED"),
+        ("Expenses", "#F25563"),
+        ("Profit", "#7C5CFC"),
+    ]
+
+    W,H = 1000.0, 330.0
+    left,right,top,bottom = 72.0,24.0,24.0,48.0
+    plot_w = W-left-right
+    plot_h = H-top-bottom
+
+    vals = []
+    for col,_ in series:
+        vals.extend([float(v) for v in pd.to_numeric(trend_df[col], errors="coerce").fillna(0)])
+    raw_min = min(vals + [0.0])
+    raw_max = max(vals + [0.0])
+    span = max(raw_max-raw_min, abs(raw_max)*0.08, 100.0)
+    y_min = raw_min - span*0.18
+    y_max = raw_max + span*0.18
+    y_span = max(y_max-y_min,1.0)
+    n = max(len(trend_df),1)
+
+    def x_at(i):
+        return left + (plot_w/2 if n<=1 else (i/(n-1))*plot_w)
+
+    def y_at(v):
+        return top + (1-((float(v)-y_min)/y_span))*plot_h
+
+    def path_for(values):
+        pts=[(x_at(i),y_at(v)) for i,v in enumerate(values)]
+        if not pts:
+            return ""
+        if len(pts)==1:
+            return f"M {pts[0][0]:.2f} {pts[0][1]:.2f}"
+        out=[f"M {pts[0][0]:.2f} {pts[0][1]:.2f}"]
+        for i in range(1,len(pts)):
+            x0,y0=pts[i-1]; x1,y1=pts[i]
+            mid=(x0+x1)/2
+            out.append(f"C {mid:.2f} {y0:.2f}, {mid:.2f} {y1:.2f}, {x1:.2f} {y1:.2f}")
+        return " ".join(out)
+
+    grid_parts=[]
+    for i in range(4):
+        val=y_min+(y_span*i/3)
+        yy=y_at(val)
+        grid_parts.append(
+            f'<line x1="{left:.1f}" y1="{yy:.1f}" x2="{W-right:.1f}" y2="{yy:.1f}" '
+            f'stroke="{grid}" stroke-width="1" opacity=".42" stroke-dasharray="4 7"/>'
+        )
+        grid_parts.append(
+            f'<text x="{left-12:.1f}" y="{yy+4:.1f}" text-anchor="end" '
+            f'fill="{text_muted}" font-size="11">${val:,.0f}</text>'
+        )
+
+    date_parts=[]
+    for i,row in trend_df.reset_index(drop=True).iterrows():
+        date_parts.append(
+            f'<text x="{x_at(i):.1f}" y="{H-15:.1f}" text-anchor="middle" '
+            f'fill="{text_muted}" font-size="11">{row["Month"]}</text>'
+        )
+
+    line_parts=[]
+    point_parts=[]
+    for col,color in series:
+        values=[float(v) for v in pd.to_numeric(trend_df[col],errors="coerce").fillna(0)]
+        p=path_for(values)
+        line_parts.append(
+            f'<path d="{p}" fill="none" stroke="{color}" stroke-width="4" '
+            f'stroke-linecap="round" stroke-linejoin="round"/>'
+        )
+        for i,v in enumerate(values):
+            x=x_at(i); y=y_at(v)
+            month=str(trend_df.iloc[i]["Month"])
+            point_parts.append(
+                f'<circle cx="{x:.2f}" cy="{y:.2f}" r="5" fill="{color}" '
+                f'stroke="{plot_bg}" stroke-width="2"><title>{month} — {col}: ${v:,.2f}</title></circle>'
+            )
+
+    html=textwrap.dedent(f"""
+    <style>
+      html,body{{margin:0;padding:0;background:transparent;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}}
+      *{{box-sizing:border-box;}}
+    </style>
+    <div style="background:{card_bg};border:1px solid {border};border-radius:24px;overflow:hidden;
+                box-shadow:0 14px 34px rgba(0,0,0,.08);">
+      <div style="padding:18px 22px 8px 22px;">
+        <div style="color:{text_main};font-size:1rem;font-weight:850;">Six-month operating trend</div>
+        <div style="color:{text_muted};font-size:.78rem;margin-top:3px;">
+          Revenue, expenses, and profit from recorded Sullivan transactions
+        </div>
+      </div>
+      <div style="margin:6px 12px 12px;background:{plot_bg};border:1px solid {border};border-radius:20px;overflow:hidden;">
+        <svg viewBox="0 0 {W:.0f} {H:.0f}" width="100%" preserveAspectRatio="xMidYMid meet" style="display:block;min-height:260px;">
+          {''.join(grid_parts)}
+          {''.join(date_parts)}
+          {''.join(line_parts)}
+          {''.join(point_parts)}
+        </svg>
+      </div>
+      <div style="display:flex;gap:18px;flex-wrap:wrap;color:{text_muted};font-size:.76rem;padding:0 20px 18px;">
+        <span><b style="color:#2F80ED;">●</b>&nbsp; Revenue</span>
+        <span><b style="color:#F25563;">●</b>&nbsp; Expenses</span>
+        <span><b style="color:#7C5CFC;">●</b>&nbsp; Profit</span>
+        <span style="margin-left:auto;">Hover points for exact values</span>
+      </div>
+    </div>
+    """).strip()
+
+    components.html(html,height=470,scrolling=False)
+
+
+def v202_render_financial_position(snapshot, is_dark):
+    """Replace the broken native financial-position chart with a clean balance-position visual."""
+    card_bg = "#102338" if is_dark else "#FFFFFF"
+    plot_bg = "#0A1828" if is_dark else "#F4F9FD"
+    border = "#294763" if is_dark else "#DCE8F2"
+    text_main = "#F7FBFF" if is_dark else "#102A43"
+    text_muted = "#9FB4C8" if is_dark else "#718499"
+
+    items = [
+        ("Cash", max(float(snapshot["cash"]),0.0), "#22C879"),
+        ("Receivables", float(snapshot["ar_open"]), "#2F80ED"),
+        ("Assets", float(snapshot["asset_book"]), "#7C5CFC"),
+        ("Debt", float(snapshot["total_debt"]), "#F25563"),
+        ("Bills", float(snapshot["ap_open"]), "#F4A11A"),
+    ]
+    max_value=max([v for _,v,_ in items]+[1.0])
+
+    bars=[]
+    for label,value,color in items:
+        width=max(2.0,(value/max_value)*100.0) if value>0 else 0
+        bars.append(f"""
+        <div style="margin-bottom:14px;">
+          <div style="display:flex;justify-content:space-between;gap:12px;margin-bottom:6px;">
+            <span style="color:{text_main};font-size:.82rem;font-weight:750;">{label}</span>
+            <span style="color:{text_muted};font-size:.82rem;font-weight:700;">${value:,.2f}</span>
+          </div>
+          <div style="height:12px;background:{plot_bg};border-radius:999px;overflow:hidden;border:1px solid {border};">
+            <div style="height:100%;width:{width:.2f}%;background:{color};border-radius:999px;"></div>
+          </div>
+        </div>
+        """)
+
+    html=textwrap.dedent(f"""
+    <style>
+      html,body{{margin:0;padding:0;background:transparent;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}}
+      *{{box-sizing:border-box;}}
+    </style>
+    <div style="background:{card_bg};border:1px solid {border};border-radius:22px;padding:18px 20px;
+                box-shadow:0 12px 30px rgba(0,0,0,.07);">
+      <div style="color:{text_main};font-size:1rem;font-weight:850;">Financial position</div>
+      <div style="color:{text_muted};font-size:.77rem;margin:3px 0 18px;">
+        A quick visual of the major amounts currently recorded in this workspace
+      </div>
+      {''.join(bars)}
+    </div>
+    """).strip()
+    components.html(html,height=365,scrolling=False)
+
+
 def v202_render_business_intelligence():
     st.subheader("Business Intelligence")
     st.caption(
@@ -7136,19 +7310,7 @@ def v202_render_business_intelligence():
                 )
 
         with right:
-            st.markdown("### Financial position")
-            position = pd.DataFrame({
-                "Area":["Cash","Receivables","Assets","Debt","Bills"],
-                "Amount":[
-                    max(s["cash"],0),
-                    s["ar_open"],
-                    s["asset_book"],
-                    s["total_debt"],
-                    s["ap_open"],
-                ]
-            }).set_index("Area")
-            st.bar_chart(position, height=310, width="stretch")
-            st.caption("A simple comparison of major recorded financial positions. This is not a valuation.")
+            v202_render_financial_position(s, is_dark)
 
             if s["total_debt"] > 0 and s["asset_book"] > 0:
                 st.metric(
@@ -7157,17 +7319,12 @@ def v202_render_business_intelligence():
                 )
 
     with trends_tab:
-        st.markdown("### Six-month operating trend")
         trend = s["trend"].copy()
 
         if trend.empty:
             st.info("Not enough transaction history to build a trend yet.")
         else:
-            st.line_chart(
-                trend.set_index("Month")[["Revenue","Expenses","Profit"]],
-                height=330,
-                width="stretch"
-            )
+            v202_render_stock_style_trend(trend, is_dark)
             st.dataframe(
                 trend,
                 width="stretch",
@@ -7987,32 +8144,32 @@ with st.sidebar:
         "Support questions do not use your normal AI points."
     )
 
-main_sections=st.tabs(["Home","Money In","Money Out","Bank","Taxes","Reports","Insights","Finance","Team","Plan & AI","Advanced","Settings"])
+main_sections=st.tabs(["Home","Advanced","Money In","Money Out","Bank","Taxes","Reports","Insights","Finance","Team","Plan & AI","Settings"])
 
 
 with main_sections[0]:
     home_tabs=[st.container()]
-with main_sections[1]:
-    sales_tabs=st.tabs(["Customers","Estimates","Invoices","Credit Notes","Recurring","Statements"])
 with main_sections[2]:
-    expense_tabs=st.tabs(["Vendors","Purchase Orders","Bills","Documents"])
+    sales_tabs=st.tabs(["Customers","Estimates","Invoices","Credit Notes","Recurring","Statements"])
 with main_sections[3]:
-    banking_tabs=st.tabs(["Bank Activity","Reconciliation"])
+    expense_tabs=st.tabs(["Vendors","Purchase Orders","Bills","Documents"])
 with main_sections[4]:
-    tax_tabs=st.tabs(["Tax Center"])
+    banking_tabs=st.tabs(["Bank Activity","Reconciliation"])
 with main_sections[5]:
-    report_tabs=st.tabs(["Financial Reports","Money Owed / Bills Owed"])
+    tax_tabs=st.tabs(["Tax Center"])
 with main_sections[6]:
+    report_tabs=st.tabs(["Financial Reports","Money Owed / Bills Owed"])
+with main_sections[7]:
     v202_render_business_intelligence()
 
-with main_sections[7]:
+with main_sections[8]:
     finance_sections=st.tabs(["Debt & Financing","Assets & Equity"])
     with finance_sections[0]:
         v20_render_finance()
     with finance_sections[1]:
         v201_render_assets_equity()
 
-with main_sections[8]:
+with main_sections[9]:
     st.subheader("Team")
 
     if not v171_is_signed_in():
@@ -8073,7 +8230,7 @@ with main_sections[8]:
             else:
                 st.info("Only an Owner or Manager can invite employees.")
 
-with main_sections[9]:
+with main_sections[10]:
     st.subheader("Plan & AI")
     st.caption("Manage your Sullivan membership, team seats, billing status, and AI usage.")
 
@@ -8321,7 +8478,7 @@ with main_sections[9]:
                     else:
                         st.dataframe(usage,use_container_width=True,hide_index=True)
 
-with main_sections[10]:
+with main_sections[1]:
     accountant_tabs=st.tabs([
         "Import & Analyze","Question Queue","Chart of Accounts","Opening Balances",
         "Saved Ledger","General Ledger","Manual Journals","Corrections / Reversals",
