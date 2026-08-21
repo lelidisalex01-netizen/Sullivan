@@ -13,7 +13,7 @@ import stripe
 import requests
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V20.3", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V20.3.1", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -4187,7 +4187,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V20.3</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V20.3.1</span></div>",unsafe_allow_html=True)
 
 
 
@@ -7299,6 +7299,18 @@ Under Top priorities, give 3 priorities ranked #1, #2, #3. For each priority inc
 - A practical next action
 
 Use the owner's optional answers when supplied. If an answer is blank, do not assume it.
+
+STRICT OUTPUT FORMATTING:
+- Use ordinary Markdown only.
+- NEVER use LaTeX, TeX, math mode, equations, dollar-delimited math, backticks around money,
+  escaped dollar signs, asterisks inside currency values, or mathematical notation.
+- Every currency value must be plain human-readable text like "$4,250.00".
+- Every percentage must be plain text like "37.0%".
+- Do not concatenate numbers with surrounding words.
+- Put spaces around monetary values naturally in sentences.
+- Do not create links, anchors, SVG references, HTML, or raw URLs.
+- Keep headings and bullets clean and readable in Streamlit Markdown.
+
 For consequential tax, legal, lending, or investment decisions, frame the recommendation
 as business-planning guidance and recommend professional confirmation where appropriate.
 """
@@ -7322,6 +7334,38 @@ as business-planning guidance and recommend professional confirmation where appr
         f"Personalized business advisor | focus={focus}"
     )
     return answer
+
+
+
+def v203_clean_advisor_markdown(value):
+    """
+    Defensive display cleanup for AI business-advisor output.
+    Prevents currency values from being interpreted as Streamlit/Markdown math.
+    """
+    value = str(value or "")
+
+    # Remove accidental TeX math delimiters and common escaped currency forms.
+    value = value.replace("\\$", "$")
+    value = value.replace("\\(", "").replace("\\)", "")
+    value = value.replace("\\[", "").replace("\\]", "")
+
+    # Clean accidental formatting artifacts immediately around currency.
+    value = re.sub(r'[`*]+(?=\$)', '', value)
+    value = re.sub(r'(?<=\d)[`*]+', '', value)
+
+    # If the model emitted a bare dollar-delimited numeric expression such as
+    # $4,250$ or $1,572.38$, keep it as ordinary currency rather than math.
+    value = re.sub(
+        r'\$(\d[\d,]*(?:\.\d{1,2})?)\$',
+        lambda m: "$" + m.group(1),
+        value
+    )
+
+    # Repair cases where Markdown emphasis gets jammed against punctuation/words.
+    value = re.sub(r'\*{2,}', '**', value)
+    value = re.sub(r'(\$[\d,]+(?:\.\d{1,2})?)\*\*', r'\1', value)
+
+    return value.strip()
 
 
 def v203_render_advisor(snapshot, is_dark):
@@ -7442,6 +7486,7 @@ def v203_render_advisor(snapshot, is_dark):
         try:
             with st.spinner("Sullivan is reviewing your business…"):
                 result = v203_run_business_advisor(snapshot, selected, answers)
+            result = v203_clean_advisor_markdown(result)
             st.session_state["v203_last_advice"] = result
             st.session_state["v203_last_focus"] = selected
             st.success("Personalized business review ready.")
@@ -7453,7 +7498,9 @@ def v203_render_advisor(snapshot, is_dark):
         st.markdown(
             f"### Personalized review · {st.session_state.get('v203_last_focus','Overall')}"
         )
-        st.markdown(st.session_state["v203_last_advice"])
+        st.markdown(
+            v203_clean_advisor_markdown(st.session_state["v203_last_advice"])
+        )
         st.caption(
             "Suggestions are generated from the records and optional context available to Sullivan. "
             "Review important tax, legal, lending, and investment decisions with the appropriate professional."
