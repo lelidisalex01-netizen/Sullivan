@@ -3,15 +3,15 @@ from pathlib import Path
 from typing import Optional
 from datetime import date, datetime, timedelta
 import pandas as pd
-import requests
 import streamlit as st
 from io import BytesIO
 from dotenv import load_dotenv, set_key
 from openai import OpenAI
 import stripe
+import requests
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V18.3", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V18.3.1", page_icon="S", layout="wide")
 
 
 # Sullivan V18.3 visual system: calm navy + blue + mint + warm amber.
@@ -2910,20 +2910,34 @@ def v18_company_billing(company_id):
            FROM companies WHERE id=?""",
         (cid,),
     )
+
     if d.empty:
         return None
 
     result = d.iloc[0].to_dict()
 
-    # Supabase is authoritative for paid billing/subscription state.
+    # Supabase is authoritative for Stripe-backed billing state.
     remote = v184_supabase_subscription(cid)
+
     if remote:
         result["subscription_plan"] = remote.get("plan") or result.get("subscription_plan") or "Trial"
-        result["subscription_status"] = remote.get("subscription_status") or result.get("subscription_status") or "Trial"
+        result["subscription_status"] = (
+            remote.get("subscription_status")
+            or result.get("subscription_status")
+            or "Trial"
+        )
         result["ai_credit_limit"] = int(remote.get("ai_credits") or 0)
-        result["seat_limit"] = int(remote.get("seat_limit") or 1)
-        result["stripe_customer_id"] = remote.get("stripe_customer_id") or result.get("stripe_customer_id") or ""
-        result["stripe_subscription_id"] = remote.get("stripe_subscription_id") or result.get("stripe_subscription_id") or ""
+        result["seat_limit"] = max(1, int(remote.get("seat_limit") or 1))
+        result["stripe_customer_id"] = (
+            remote.get("stripe_customer_id")
+            or result.get("stripe_customer_id")
+            or ""
+        )
+        result["stripe_subscription_id"] = (
+            remote.get("stripe_subscription_id")
+            or result.get("stripe_subscription_id")
+            or ""
+        )
         result["cancel_at_period_end"] = bool(remote.get("cancel_at_period_end", False))
         result["current_period_end"] = remote.get("current_period_end")
 
@@ -3170,6 +3184,7 @@ def _secret_value(name, default=""):
         pass
     return str(os.getenv(name, default) or "").strip()
 
+
 def supabase_url():
     return _secret_value("SUPABASE_URL")
 
@@ -3192,7 +3207,7 @@ def supabase_headers():
 
 
 def v184_supabase_subscription(company_id):
-    """Read the authoritative Sullivan subscription record from Supabase."""
+    """Read the authoritative Sullivan billing record from Supabase."""
     if not supabase_ready():
         return None
 
@@ -3200,22 +3215,30 @@ def v184_supabase_subscription(company_id):
     url = (
         f"{supabase_url().rstrip('/')}"
         "/rest/v1/sullivan_subscriptions"
-        f"?company_id=eq.{cid}"
-        "&select=*"
-        "&limit=1"
+        f"?company_id=eq.{cid}&select=*&limit=1"
     )
 
     try:
-        response = requests.get(url, headers=supabase_headers(), timeout=10)
+        response = requests.get(
+            url,
+            headers=supabase_headers(),
+            timeout=10,
+        )
+
         if response.status_code != 200:
-            print("Supabase subscription lookup failed:", response.status_code, response.text)
+            print(
+                "Supabase subscription lookup failed:",
+                response.status_code,
+                response.text,
+            )
             return None
+
         rows = response.json()
         return rows[0] if rows else None
+
     except Exception as e:
         print("Supabase subscription lookup error:", str(e))
         return None
-
 
 def stripe_secret_key():
     return _secret_value("STRIPE_SECRET_KEY")
@@ -3420,7 +3443,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V18</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V18.3.1</span></div>",unsafe_allow_html=True)
 
 
 
