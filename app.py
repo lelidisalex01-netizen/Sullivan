@@ -13,8 +13,9 @@ import stripe
 import requests
 from pydantic import BaseModel, Field
 import math
+import html
 
-st.set_page_config(page_title="Sullivan V21.1", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V21.1.1", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -4289,7 +4290,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V21.1</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V21.1.1</span></div>",unsafe_allow_html=True)
 
 
 
@@ -7536,6 +7537,226 @@ def v204_income_summary():
             annual_other += v204_annualize(r.get("other_deductions",0),freq)
     return df,annual_gross,annual_withheld,annual_other
 
+
+# ============================================================
+# V21.1.1 — PROFESSIONAL SULLIVAN CHART SYSTEM
+# Replaces remaining native white Streamlit charts.
+# ============================================================
+V2111_CHART_COLORS = [
+    "#2F80ED","#22C879","#8A63F6","#F4A11A","#F25563",
+    "#24B6C9","#4D7CFE","#E36BAE","#58B09C","#D98E32"
+]
+
+def v2111_chart_theme():
+    is_dark = st.session_state.get("v19_ui_theme") == "Dark"
+    return {
+        "dark": is_dark,
+        "card": "#102338" if is_dark else "#FFFFFF",
+        "plot": "#0A1828" if is_dark else "#F5F9FD",
+        "border": "#294763" if is_dark else "#DCE8F2",
+        "text": "#F7FBFF" if is_dark else "#102A43",
+        "muted": "#9FB4C8" if is_dark else "#718499",
+        "grid": "#29445E" if is_dark else "#DDE8F1",
+    }
+
+def v2111_money_short(value):
+    value=float(value or 0)
+    av=abs(value)
+    if av>=1_000_000:
+        return f"${value/1_000_000:.1f}M"
+    if av>=1_000:
+        return f"${value/1_000:.1f}K"
+    return f"${value:,.0f}"
+
+def v2111_render_color_bars(title, subtitle, labels, values, colors=None, height=None):
+    """Rounded horizontal bars for categorical money comparisons."""
+    theme=v2111_chart_theme()
+    labels=[str(x) for x in labels]
+    values=[max(0.0,float(x or 0)) for x in values]
+    colors=colors or V2111_CHART_COLORS
+    maximum=max(values+[1.0])
+
+    rows=[]
+    for i,(label,value) in enumerate(zip(labels,values)):
+        color=colors[i % len(colors)]
+        pct=(value/maximum*100.0) if maximum else 0.0
+        rows.append(f"""
+        <div style="margin:0 0 14px 0;">
+          <div style="display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:6px;">
+            <div style="color:{theme['text']};font-size:.83rem;font-weight:750;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+              <span style="color:{color};margin-right:7px;">●</span>{html.escape(label)}
+            </div>
+            <div style="color:{theme['text']};font-size:.83rem;font-weight:850;">${value:,.2f}</div>
+          </div>
+          <div style="height:14px;border-radius:999px;background:{theme['plot']};border:1px solid {theme['border']};overflow:hidden;">
+            <div style="height:100%;width:{pct:.2f}%;min-width:{'4px' if value>0 else '0'};background:{color};border-radius:999px;"></div>
+          </div>
+        </div>
+        """)
+
+    html_block=f"""
+    <style>
+      html,body{{margin:0;padding:0;background:transparent;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}}
+      *{{box-sizing:border-box;}}
+    </style>
+    <div style="background:{theme['card']};border:1px solid {theme['border']};border-radius:24px;padding:18px 20px;
+                box-shadow:0 14px 34px rgba(0,0,0,.07);">
+      <div style="color:{theme['text']};font-size:1rem;font-weight:900;">{html.escape(str(title))}</div>
+      <div style="color:{theme['muted']};font-size:.78rem;margin:4px 0 18px;">{html.escape(str(subtitle))}</div>
+      {''.join(rows)}
+    </div>
+    """
+    auto_height=max(260,100+len(rows)*50)
+    components.html(html_block,height=height or auto_height,scrolling=False)
+
+def v2111_render_allocation_donut(title, subtitle, labels, values, center_label="Monthly", center_value=None):
+    """Sullivan wealth/budget donut with colored legend and percentages."""
+    theme=v2111_chart_theme()
+    labels=[str(x) for x in labels]
+    values=[max(0.0,float(x or 0)) for x in values]
+    total=sum(values)
+    if total<=0:
+        labels=["No allocation yet"]
+        values=[1.0]
+        total=1.0
+
+    cx,cy,r=165,165,105
+    circ=2*math.pi*r
+    offset=0.0
+    arcs=[]
+    legend=[]
+    for i,(label,value) in enumerate(zip(labels,values)):
+        color=V2111_CHART_COLORS[i % len(V2111_CHART_COLORS)]
+        frac=value/total
+        dash=frac*circ
+        pct=frac*100
+        arcs.append(
+            f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="{color}" stroke-width="34" '
+            f'stroke-dasharray="{dash:.2f} {circ-dash:.2f}" stroke-dashoffset="{-offset:.2f}" '
+            f'transform="rotate(-90 {cx} {cy})"><title>{html.escape(label)}: ${value:,.2f} ({pct:.1f}%)</title></circle>'
+        )
+        offset += dash
+        legend.append(
+            f'<div style="display:grid;grid-template-columns:1fr auto auto;gap:14px;align-items:center;'
+            f'padding:9px 0;border-bottom:1px solid {theme["border"]};">'
+            f'<div style="color:{theme["text"]};font-size:.81rem;font-weight:750;">'
+            f'<span style="color:{color};margin-right:7px;">●</span>{html.escape(label)}</div>'
+            f'<div style="color:{theme["text"]};font-size:.81rem;font-weight:800;">${value:,.2f}</div>'
+            f'<div style="color:{theme["muted"]};font-size:.77rem;font-weight:700;min-width:48px;text-align:right;">{pct:.1f}%</div>'
+            f'</div>'
+        )
+
+    cv = total if center_value is None else float(center_value)
+    html_block=f"""
+    <style>
+      html,body{{margin:0;padding:0;background:transparent;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}}
+      *{{box-sizing:border-box;}}
+    </style>
+    <div style="background:{theme['card']};border:1px solid {theme['border']};border-radius:24px;padding:18px 20px;
+                box-shadow:0 14px 34px rgba(0,0,0,.07);">
+      <div style="color:{theme['text']};font-size:1rem;font-weight:900;">{html.escape(str(title))}</div>
+      <div style="color:{theme['muted']};font-size:.78rem;margin:4px 0 12px;">{html.escape(str(subtitle))}</div>
+      <div style="display:flex;gap:28px;align-items:center;flex-wrap:wrap;">
+        <div style="flex:0 0 330px;max-width:100%;">
+          <svg viewBox="0 0 330 330" width="100%" style="display:block;">
+            <circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="{theme['plot']}" stroke-width="34"/>
+            {''.join(arcs)}
+            <text x="{cx}" y="{cy-9}" text-anchor="middle" fill="{theme['muted']}" font-size="13">{html.escape(str(center_label))}</text>
+            <text x="{cx}" y="{cy+21}" text-anchor="middle" fill="{theme['text']}" font-size="25" font-weight="900">${cv:,.0f}</text>
+          </svg>
+        </div>
+        <div style="flex:1;min-width:290px;">{''.join(legend)}</div>
+      </div>
+    </div>
+    """
+    components.html(html_block,height=440,scrolling=False)
+
+def v2111_render_balance_curve(title, subtitle, x_values, y_values):
+    """Rounded stock-style line chart for balances/payoff curves."""
+    theme=v2111_chart_theme()
+    xs=[float(v) for v in x_values]
+    ys=[float(v) for v in y_values]
+    if not xs or not ys:
+        st.info("No chart data available.")
+        return
+
+    W,H=1000.0,320.0
+    left,right,top,bottom=76.0,28.0,26.0,48.0
+    pw,ph=W-left-right,H-top-bottom
+    ymin=min(ys+[0.0])
+    ymax=max(ys+[0.0])
+    span=max(ymax-ymin,1.0)
+    ymin-=span*.08
+    ymax+=span*.08
+    span=max(ymax-ymin,1.0)
+
+    xmin,xmax=min(xs),max(xs)
+    xrange=max(xmax-xmin,1.0)
+    x_at=lambda x:left+((x-xmin)/xrange)*pw
+    y_at=lambda y:top+(1-((y-ymin)/span))*ph
+
+    pts=[(x_at(x),y_at(y)) for x,y in zip(xs,ys)]
+    path=[f"M {pts[0][0]:.2f} {pts[0][1]:.2f}"]
+    for i in range(1,len(pts)):
+        x0,y0=pts[i-1]; x1,y1=pts[i]
+        mid=(x0+x1)/2
+        path.append(f"C {mid:.2f} {y0:.2f}, {mid:.2f} {y1:.2f}, {x1:.2f} {y1:.2f}")
+
+    grids=[]
+    for i in range(5):
+        val=ymin+(span*i/4)
+        yy=y_at(val)
+        grids.append(
+            f'<line x1="{left}" y1="{yy:.1f}" x2="{W-right}" y2="{yy:.1f}" '
+            f'stroke="{theme["grid"]}" stroke-width="1" opacity=".5" stroke-dasharray="4 7"/>'
+        )
+        grids.append(
+            f'<text x="{left-12}" y="{yy+4:.1f}" text-anchor="end" fill="{theme["muted"]}" font-size="11">'
+            f'{v2111_money_short(val)}</text>'
+        )
+
+    dots=[]
+    step=max(1,len(pts)//8)
+    for i,(x,y) in enumerate(zip(xs,ys)):
+        if i%step==0 or i==len(pts)-1:
+            px,py=pts[i]
+            dots.append(
+                f'<circle cx="{px:.2f}" cy="{py:.2f}" r="4.5" fill="#2F80ED" stroke="{theme["plot"]}" stroke-width="2">'
+                f'<title>Period {int(x)} — ${y:,.2f}</title></circle>'
+            )
+
+    area_path=" ".join(path)+f" L {pts[-1][0]:.2f} {H-bottom:.2f} L {pts[0][0]:.2f} {H-bottom:.2f} Z"
+
+    html_block=f"""
+    <style>
+      html,body{{margin:0;padding:0;background:transparent;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}}
+      *{{box-sizing:border-box;}}
+    </style>
+    <div style="background:{theme['card']};border:1px solid {theme['border']};border-radius:24px;padding:18px 18px 12px;
+                box-shadow:0 14px 34px rgba(0,0,0,.07);">
+      <div style="color:{theme['text']};font-size:1rem;font-weight:900;margin-left:4px;">{html.escape(str(title))}</div>
+      <div style="color:{theme['muted']};font-size:.78rem;margin:4px 4px 10px;">{html.escape(str(subtitle))}</div>
+      <div style="background:{theme['plot']};border:1px solid {theme['border']};border-radius:19px;overflow:hidden;padding:4px 4px 0;">
+        <svg viewBox="0 0 {W:.0f} {H:.0f}" width="100%" preserveAspectRatio="xMidYMid meet" style="display:block;min-height:260px;">
+          <defs>
+            <linearGradient id="v2111Area" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#2F80ED" stop-opacity=".28"/>
+              <stop offset="100%" stop-color="#2F80ED" stop-opacity=".02"/>
+            </linearGradient>
+          </defs>
+          {''.join(grids)}
+          <path d="{area_path}" fill="url(#v2111Area)"/>
+          <path d="{' '.join(path)}" fill="none" stroke="#2F80ED" stroke-width="4"
+                stroke-linecap="round" stroke-linejoin="round"/>
+          {''.join(dots)}
+          <text x="{left}" y="{H-15}" fill="{theme['muted']}" font-size="11">Start</text>
+          <text x="{W-right}" y="{H-15}" text-anchor="end" fill="{theme['muted']}" font-size="11">Period {int(xmax)}</text>
+        </svg>
+      </div>
+    </div>
+    """
+    components.html(html_block,height=430,scrolling=False)
+
 def v204_render_income_payroll():
     country,region=v204_region()
     is_company=current_company() is not None
@@ -7721,14 +7942,20 @@ def v204_render_income_payroll():
                     st.rerun()
 
     with tabs[1]:
-        st.markdown("### Where gross income goes")
         tax=personal_tax
         net=max(0.0,annual_gross-tax["total_employee_tax"]-annual_other)
         comp=pd.DataFrame({
             "Part":["Federal income tax","Regional income tax","Social Security","Medicare","Other deductions","Estimated net"],
             "Amount":[tax["federal"],tax["regional"],tax["social"],tax["medicare"],annual_other,net]
         })
-        st.bar_chart(comp.set_index("Part"),height=330,width="stretch")
+        v2111_render_color_bars(
+            "Where gross income goes",
+            "A cleaner view of estimated annual taxes, deductions, and take-home income.",
+            comp["Part"].tolist(),
+            comp["Amount"].tolist(),
+            colors=["#4D7CFE","#8A63F6","#24B6C9","#F4A11A","#F25563","#22C879"],
+            height=420
+        )
         if annual_gross>0:
             effective=(tax["total_employee_tax"]/annual_gross)*100
             st.write(f"**Estimated tax/payroll-tax share:** {effective:.1f}% of gross income.")
@@ -8132,9 +8359,18 @@ def v211_render_wealth():
         priorities.append((str(len(priorities)+1),"Keep retirement compounding",f"Model contribution: ${monthly*alloc['Retirement']/100:,.2f}/month, subject to the account and tax rules in your region."))
         for n,title,body in priorities:
             st.markdown(f"**{n}. {title}**  \n{body}")
-        st.markdown("### Monthly allocation")
-        chart=pd.DataFrame({"Destination":list(alloc.keys()),"Monthly amount":[monthly*v/100 for v in alloc.values()]})
-        st.bar_chart(chart.set_index("Destination"),height=300,width="stretch")
+        chart=pd.DataFrame({
+            "Destination":list(alloc.keys()),
+            "Monthly amount":[monthly*v/100 for v in alloc.values()]
+        })
+        v2111_render_allocation_donut(
+            "Monthly allocation",
+            "How Sullivan's current model distributes your deployable monthly money.",
+            chart["Destination"].tolist(),
+            chart["Monthly amount"].tolist(),
+            center_label="Deployable monthly",
+            center_value=monthly
+        )
         with st.expander("Plan details"):
             st.write(f"**Mode:** {p['wealth_mode']}")
             st.write(f"**Goal:** {p['goal']}")
@@ -9008,8 +9244,6 @@ def v20_render_finance():
                 "credit card, owner loan, or other debt from **Financing Accounts**."
             )
         else:
-            st.markdown("### Debt portfolio")
-
             chart_df = accounts[[
                 "name","current_balance","annual_interest_rate","financing_type","lender"
             ]].copy()
@@ -9017,14 +9251,14 @@ def v20_render_finance():
                 chart_df["current_balance"], errors="coerce"
             ).fillna(0.0)
 
-            # Native bar chart is deliberately simple/reliable and inherits light/dark mode.
-            st.bar_chart(
-                chart_df.set_index("name")[["current_balance"]],
-                height=300,
-                width="stretch"
+            v2111_render_color_bars(
+                "Debt portfolio",
+                "Outstanding principal by financing account.",
+                chart_df["name"].astype(str).tolist(),
+                chart_df["current_balance"].tolist(),
+                colors=["#F25563","#F4A11A","#8A63F6","#2F80ED","#24B6C9"],
+                height=max(300,130+len(chart_df)*50)
             )
-
-            st.caption("Outstanding principal by financing account.")
 
             view = accounts[[
                 "name","financing_type","lender","current_balance",
@@ -9512,9 +9746,13 @@ def v20_render_finance():
             k3.metric("Total paid", v20_money(total_paid))
             k4.metric("Payments to payoff", f"{len(schedule):,}")
 
-            # A polished, simple declining-balance chart that works in both themes.
-            balance_chart = schedule.set_index("Payment #")[["Ending Balance"]]
-            st.line_chart(balance_chart, height=300, width="stretch")
+            balance_chart = schedule[["Payment #","Ending Balance"]].copy()
+            v2111_render_balance_curve(
+                "Loan payoff curve",
+                "Projected remaining principal across the repayment schedule.",
+                balance_chart["Payment #"].tolist(),
+                balance_chart["Ending Balance"].tolist()
+            )
 
             st.markdown("### Amortization schedule")
             st.dataframe(
