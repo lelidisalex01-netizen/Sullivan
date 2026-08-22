@@ -14,7 +14,7 @@ import requests
 from pydantic import BaseModel, Field
 import math
 
-st.set_page_config(page_title="Sullivan V21.0.1", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V21.1", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -600,6 +600,22 @@ def init_db():
         essential INTEGER DEFAULT 1,
         created_at TEXT NOT NULL,
         FOREIGN KEY(budget_id) REFERENCES budget_plans(id) ON DELETE CASCADE
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS wealth_plans(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        plan_name TEXT NOT NULL,
+        wealth_mode TEXT NOT NULL DEFAULT 'Personal',
+        goal TEXT NOT NULL DEFAULT 'Balanced wealth',
+        risk_style TEXT NOT NULL DEFAULT 'Balanced',
+        monthly_available REAL NOT NULL DEFAULT 0,
+        reserve_target REAL NOT NULL DEFAULT 0,
+        reserve_current REAL NOT NULL DEFAULT 0,
+        debt_rate REAL NOT NULL DEFAULT 0,
+        horizon_years INTEGER NOT NULL DEFAULT 10,
+        notes TEXT,
+        active INTEGER DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
         )""")
 
         # V20.4.2 migration: income records now feed future Personal/Business Budgeting.
@@ -4273,7 +4289,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V21.0.1</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V21.1</span></div>",unsafe_allow_html=True)
 
 
 
@@ -8001,6 +8017,130 @@ def v21_render_donut(plan,expenses,maths,is_dark):
 
     components.html(html,height=470,scrolling=False)
 
+# ============================================================
+# V21.1 — WEALTH & INVESTING
+# Connected to Sullivan Budgeting. Guidance is planning-oriented;
+# users stay in control of every financial action.
+# ============================================================
+def v211_wealth_plans():
+    return read("SELECT * FROM wealth_plans WHERE active=1 ORDER BY updated_at DESC,id DESC")
+
+def v211_budget_surplus():
+    plans=v21_budget_plans()
+    if plans.empty:
+        return 0.0,None
+    plan=plans.iloc[0]
+    expenses=v21_budget_expenses(int(plan["id"]))
+    maths=v21_budget_math(plan,expenses)
+    return max(0.0,float(maths["surplus"])),plan
+
+def v211_allocation(goal,risk,reserve_gap,debt_rate):
+    # Transparent planning model. Percentages always total 100.
+    if reserve_gap>0:
+        base={"Reserve":35,"Debt payoff":10,"Broad-market investing":25,"Goal fund":20,"Retirement":10}
+    elif debt_rate>=8:
+        base={"Reserve":10,"Debt payoff":40,"Broad-market investing":20,"Goal fund":15,"Retirement":15}
+    elif goal=="Buying real estate":
+        base={"Reserve":10,"Debt payoff":5,"Broad-market investing":20,"Goal fund":50,"Retirement":15}
+    elif goal=="Building a business":
+        base={"Reserve":15,"Debt payoff":5,"Broad-market investing":15,"Goal fund":50,"Retirement":15}
+    elif goal=="Retirement":
+        base={"Reserve":10,"Debt payoff":5,"Broad-market investing":25,"Goal fund":10,"Retirement":50}
+    elif goal=="Maximum long-term growth":
+        base={"Reserve":10,"Debt payoff":5,"Broad-market investing":50,"Goal fund":10,"Retirement":25}
+    else:
+        base={"Reserve":15,"Debt payoff":10,"Broad-market investing":30,"Goal fund":20,"Retirement":25}
+    if risk=="Conservative":
+        shift=min(15,base["Broad-market investing"])
+        base["Broad-market investing"]-=shift; base["Reserve"]+=shift
+    elif risk=="Aggressive" and reserve_gap<=0 and debt_rate<8:
+        shift=min(10,base["Reserve"])
+        base["Reserve"]-=shift; base["Broad-market investing"]+=shift
+    return base
+
+def v211_save_plan(name,mode,goal,risk,monthly,reserve_target,reserve_current,debt_rate,horizon,notes):
+    stamp=datetime.now().isoformat(timespec="seconds")
+    write(lambda c:c.execute("""INSERT INTO wealth_plans(
+        plan_name,wealth_mode,goal,risk_style,monthly_available,reserve_target,
+        reserve_current,debt_rate,horizon_years,notes,active,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,1,?,?)""",
+        (name.strip(),mode,goal,risk,float(monthly),float(reserve_target),float(reserve_current),
+         float(debt_rate),int(horizon),notes.strip(),stamp,stamp)))
+
+def v211_render_wealth():
+    st.subheader("Wealth & Investing")
+    st.caption("Turn the money left after your Sullivan Budget into a clear wealth-building plan. Sullivan explains the trade-offs; you approve what happens next.")
+    if not v171_is_signed_in():
+        st.info("Sign in to build and save a wealth plan."); return
+    budget_surplus,budget_plan=v211_budget_surplus()
+    plans=v211_wealth_plans()
+    setup,roadmap=st.tabs(["Build Wealth Plan","Wealth Dashboard"])
+    with setup:
+        if budget_plan is not None:
+            st.success(f"Connected to **{budget_plan['plan_name']}** · Sullivan sees **${budget_surplus:,.2f}/month** currently available after budgeted expenses.")
+        else:
+            st.info("No saved budget yet. You can still build a plan manually, or create a Budget first so Sullivan connects the numbers automatically.")
+        a,b,c=st.columns(3)
+        mode=a.radio("Plan for",["Personal","Business"],horizontal=True,key="v211_mode")
+        goal=b.selectbox("Primary goal",["Balanced wealth","Maximum long-term growth","Buying real estate","Retirement","Building a business"],key="v211_goal")
+        risk=c.selectbox("Risk style",["Conservative","Balanced","Aggressive"],index=1,key="v211_risk")
+        d,e,f=st.columns(3)
+        monthly=d.number_input("Monthly money available",min_value=0.0,value=float(budget_surplus),step=50.0,key="v211_monthly",help="Budgeting can fill this automatically from your monthly surplus.")
+        reserve_target=e.number_input("Emergency / operating reserve target",min_value=0.0,value=10000.0,step=500.0,key="v211_reserve_target")
+        reserve_current=f.number_input("Reserve currently saved",min_value=0.0,value=0.0,step=500.0,key="v211_reserve_current")
+        g,h=st.columns(2)
+        debt_rate=g.number_input("Highest debt interest rate (%)",min_value=0.0,max_value=100.0,value=0.0,step=0.25,key="v211_debt")
+        horizon=h.slider("Planning horizon (years)",1,40,10,key="v211_horizon")
+        reserve_gap=max(0.0,reserve_target-reserve_current)
+        alloc=v211_allocation(goal,risk,reserve_gap,debt_rate)
+        st.markdown("### Sullivan model allocation")
+        cols=st.columns(5)
+        accents={"Reserve":"#20C77A","Debt payoff":"#F25563","Broad-market investing":"#2F80ED","Goal fund":"#F4A11A","Retirement":"#8A63F6"}
+        for col,(label,pct) in zip(cols,alloc.items()):
+            with col:
+                st.markdown(f'<div style="border:1px solid rgba(120,150,180,.28);border-radius:20px;padding:16px;min-height:128px;"><div style="font-size:.78rem;font-weight:800;opacity:.72;">{label}</div><div style="font-size:1.55rem;font-weight:900;color:{accents[label]};margin-top:6px;">{pct:.0f}%</div><div style="font-size:.86rem;margin-top:4px;">${monthly*pct/100:,.2f}/mo</div></div>',unsafe_allow_html=True)
+        st.caption("This is a planning model, not an instruction to buy a specific security. Investment values can fall, taxes and account rules vary by region, and Sullivan should not move money without your approval.")
+        if reserve_gap>0: st.info(f"Priority detected: your reserve is **${reserve_gap:,.2f} below target**. Sullivan increases the reserve allocation until that gap is closed.")
+        if debt_rate>=8: st.warning(f"High-cost debt detected at **{debt_rate:.2f}%**. Sullivan gives debt reduction extra priority before increasing market exposure.")
+        name=st.text_input("Plan name",value="My Wealth Plan",key="v211_name")
+        notes=st.text_area("Goals / notes",placeholder="Example: Buy a duplex in 3 years, retire at 55, grow the business...",key="v211_notes")
+        if st.button("Save Wealth Plan",type="primary",width="stretch",key="v211_save"):
+            if not name.strip(): st.error("Give the plan a name.")
+            elif monthly<=0: st.error("Enter monthly money available, or connect a Budget with positive surplus.")
+            else:
+                v211_save_plan(name,mode,goal,risk,monthly,reserve_target,reserve_current,debt_rate,horizon,notes)
+                st.success("Wealth plan saved and connected to Sullivan."); st.rerun()
+    with roadmap:
+        if plans.empty:
+            st.info("Save a Wealth Plan to see your roadmap."); return
+        labels={f"{r['plan_name']} · {r['goal']}":int(r['id']) for _,r in plans.iterrows()}
+        chosen=st.selectbox("Saved plan",list(labels),key="v211_saved")
+        p=plans[plans.id==labels[chosen]].iloc[0]
+        gap=max(0.0,float(p["reserve_target"])-float(p["reserve_current"]))
+        alloc=v211_allocation(str(p["goal"]),str(p["risk_style"]),gap,float(p["debt_rate"]))
+        monthly=float(p["monthly_available"])
+        k1,k2,k3,k4=st.columns(4)
+        k1.metric("Deployable monthly",f"${monthly:,.2f}")
+        k2.metric("Reserve gap",f"${gap:,.2f}")
+        k3.metric("Highest debt rate",f"{float(p['debt_rate']):.2f}%")
+        k4.metric("Planning horizon",f"{int(p['horizon_years'])} years")
+        st.markdown("### What Sullivan would prioritize")
+        priorities=[]
+        if gap>0: priorities.append(("1","Finish the reserve",f"Direct about ${monthly*alloc['Reserve']/100:,.2f}/month toward the ${gap:,.2f} reserve gap."))
+        if float(p["debt_rate"])>=8: priorities.append((str(len(priorities)+1),"Attack expensive debt",f"Your {float(p['debt_rate']):.2f}% debt rate deserves priority before taking more investment risk."))
+        priorities.append((str(len(priorities)+1),str(p["goal"]),f"Direct about ${monthly*alloc['Goal fund']/100:,.2f}/month to the goal-specific fund and ${monthly*alloc['Broad-market investing']/100:,.2f}/month to long-term diversified investing."))
+        priorities.append((str(len(priorities)+1),"Keep retirement compounding",f"Model contribution: ${monthly*alloc['Retirement']/100:,.2f}/month, subject to the account and tax rules in your region."))
+        for n,title,body in priorities:
+            st.markdown(f"**{n}. {title}**  \n{body}")
+        st.markdown("### Monthly allocation")
+        chart=pd.DataFrame({"Destination":list(alloc.keys()),"Monthly amount":[monthly*v/100 for v in alloc.values()]})
+        st.bar_chart(chart.set_index("Destination"),height=300,width="stretch")
+        with st.expander("Plan details"):
+            st.write(f"**Mode:** {p['wealth_mode']}")
+            st.write(f"**Goal:** {p['goal']}")
+            st.write(f"**Risk style:** {p['risk_style']}")
+            if str(p.get('notes','') or '').strip(): st.write(f"**Notes:** {p['notes']}")
+
 def v21_render_budgeting():
     st.subheader("Budgeting")
     st.caption(
@@ -9569,7 +9709,7 @@ with st.sidebar:
         "Support questions do not use your normal AI points."
     )
 
-main_sections=st.tabs(["Home","Advanced","Income & Payroll","Budgeting","Money In","Money Out","Bank","Taxes","Reports","Insights","Finance","Team","Plan & AI","Settings"])
+main_sections=st.tabs(["Home","Advanced","Income & Payroll","Budgeting","Wealth","Money In","Money Out","Bank","Taxes","Reports","Insights","Finance","Team","Plan & AI","Settings"])
 
 
 with main_sections[0]:
@@ -9581,26 +9721,29 @@ with main_sections[3]:
     v21_render_budgeting()
 
 with main_sections[4]:
-    sales_tabs=st.tabs(["Customers","Estimates","Invoices","Credit Notes","Recurring","Statements"])
+    v211_render_wealth()
+
 with main_sections[5]:
-    expense_tabs=st.tabs(["Vendors","Purchase Orders","Bills","Documents"])
+    sales_tabs=st.tabs(["Customers","Estimates","Invoices","Credit Notes","Recurring","Statements"])
 with main_sections[6]:
-    banking_tabs=st.tabs(["Bank Activity","Reconciliation"])
+    expense_tabs=st.tabs(["Vendors","Purchase Orders","Bills","Documents"])
 with main_sections[7]:
-    tax_tabs=st.tabs(["Tax Center"])
+    banking_tabs=st.tabs(["Bank Activity","Reconciliation"])
 with main_sections[8]:
-    report_tabs=st.tabs(["Financial Reports","Money Owed / Bills Owed"])
+    tax_tabs=st.tabs(["Tax Center"])
 with main_sections[9]:
+    report_tabs=st.tabs(["Financial Reports","Money Owed / Bills Owed"])
+with main_sections[10]:
     v202_render_business_intelligence()
 
-with main_sections[10]:
+with main_sections[11]:
     finance_sections=st.tabs(["Debt & Financing","Assets & Equity"])
     with finance_sections[0]:
         v20_render_finance()
     with finance_sections[1]:
         v201_render_assets_equity()
 
-with main_sections[11]:
+with main_sections[12]:
     st.subheader("Team")
 
     if not v171_is_signed_in():
@@ -9661,7 +9804,7 @@ with main_sections[11]:
             else:
                 st.info("Only an Owner or Manager can invite employees.")
 
-with main_sections[12]:
+with main_sections[13]:
     st.subheader("Plan & AI")
     st.caption("Manage your Sullivan membership, team seats, billing status, and AI usage.")
 
@@ -9916,7 +10059,7 @@ with main_sections[1]:
         "Accounting Periods","Smart Close","Integrity Center","Audit Trail","Accountant Export"
     ])
 
-with main_sections[13]:
+with main_sections[14]:
     st.subheader("Settings")
     st.caption("Manage your Sullivan preferences, workspaces, account details, and support options.")
 
