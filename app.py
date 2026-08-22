@@ -13,7 +13,7 @@ import stripe
 import requests
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V20.4.3", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V21", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -221,6 +221,8 @@ WORKSPACE_ACCOUNTING_TABLES = (
     "income_sources",
     "employees",
     "payroll_runs",
+    "budget_plans",
+    "budget_expenses",
 )
 
 SHARED_SULLIVAN_TABLES = (
@@ -573,6 +575,30 @@ def init_db():
         employer_payroll_tax REAL NOT NULL DEFAULT 0,
         region_label TEXT,
         created_at TEXT NOT NULL
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS budget_plans(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        plan_name TEXT NOT NULL,
+        budget_type TEXT NOT NULL DEFAULT 'Personal',
+        monthly_net_income REAL NOT NULL DEFAULT 0,
+        strategy TEXT NOT NULL DEFAULT 'Balanced',
+        investment_percent REAL NOT NULL DEFAULT 0,
+        retirement_percent REAL NOT NULL DEFAULT 0,
+        savings_percent REAL NOT NULL DEFAULT 0,
+        notes TEXT,
+        active INTEGER DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS budget_expenses(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        budget_id INTEGER NOT NULL,
+        category TEXT NOT NULL,
+        description TEXT,
+        monthly_amount REAL NOT NULL DEFAULT 0,
+        essential INTEGER DEFAULT 1,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(budget_id) REFERENCES budget_plans(id) ON DELETE CASCADE
         )""")
 
         # V20.4.2 migration: income records now feed future Personal/Business Budgeting.
@@ -4246,7 +4272,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V20.4.3</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V21</span></div>",unsafe_allow_html=True)
 
 
 
@@ -7776,6 +7802,520 @@ def v204_render_income_payroll():
                                    "medicare","other_deductions","net_pay","employer_payroll_tax","region_label"]],
                              width="stretch",hide_index=True)
 
+
+# ============================================================
+# V21 — SULLIVAN BUDGETING
+# Personal + Business budgets with Income → Expenses → Surplus
+# → Investing/Retirement/Reserve allocation.
+# ============================================================
+V21_PERSONAL_EXPENSES = [
+    "Housing","Utilities","Groceries","Transportation","Insurance","Debt payments",
+    "Phone / Internet","Healthcare","Subscriptions","Entertainment","Dining",
+    "Education","Family / Childcare","Travel","Other"
+]
+V21_BUSINESS_EXPENSES = [
+    "Payroll","Rent / Lease","Utilities","Inventory / Materials","Software / Subscriptions",
+    "Insurance","Debt payments","Marketing","Professional fees","Vehicle / Travel",
+    "Taxes","Repairs / Maintenance","Equipment","Other"
+]
+
+def v21_budget_plans():
+    return read("""SELECT * FROM budget_plans
+                   WHERE active=1
+                   ORDER BY updated_at DESC,id DESC""")
+
+def v21_budget_expenses(budget_id):
+    return read("""SELECT * FROM budget_expenses
+                   WHERE budget_id=?
+                   ORDER BY essential DESC,monthly_amount DESC,id DESC""",
+                (int(budget_id),))
+
+def v21_strategy_allocations(budget_type, strategy):
+    """
+    Returns how Sullivan suggests splitting MONTHLY SURPLUS.
+    These are editable planning defaults, not investment advice.
+    """
+    if budget_type=="Business":
+        if strategy=="Aggressive growth":
+            return {"invest":70.0,"retirement":0.0,"savings":30.0,
+                    "invest_label":"Business reinvestment","retirement_label":"Retirement","savings_label":"Cash reserve"}
+        return {"invest":35.0,"retirement":0.0,"savings":65.0,
+                "invest_label":"Business reinvestment","retirement_label":"Retirement","savings_label":"Cash reserve"}
+
+    if strategy=="Aggressively invest extra income":
+        return {"invest":65.0,"retirement":20.0,"savings":15.0,
+                "invest_label":"Investing","retirement_label":"Retirement","savings_label":"Savings / reserve"}
+    return {"invest":25.0,"retirement":55.0,"savings":20.0,
+            "invest_label":"Investing","retirement_label":"Retirement","savings_label":"Savings / reserve"}
+
+def v21_create_budget(plan_name,budget_type,income,strategy,notes=""):
+    alloc=v21_strategy_allocations(budget_type,strategy)
+    stamp=datetime.now().isoformat(timespec="seconds")
+    def _save(c):
+        c.execute("""INSERT INTO budget_plans(
+            plan_name,budget_type,monthly_net_income,strategy,
+            investment_percent,retirement_percent,savings_percent,
+            notes,active,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,1,?,?)""",
+            (str(plan_name).strip(),budget_type,float(income),strategy,
+             alloc["invest"],alloc["retirement"],alloc["savings"],
+             str(notes or "").strip(),stamp,stamp))
+        return int(c.execute("SELECT last_insert_rowid()").fetchone()[0])
+    return write(_save)
+
+def v21_add_expense(budget_id,category,description,amount,essential=True):
+    stamp=datetime.now().isoformat(timespec="seconds")
+    write(lambda c:c.execute("""INSERT INTO budget_expenses(
+        budget_id,category,description,monthly_amount,essential,created_at)
+        VALUES(?,?,?,?,?,?)""",
+        (int(budget_id),str(category),str(description or "").strip(),
+         float(amount),1 if essential else 0,stamp)))
+
+def v21_update_budget(budget_id,income,strategy):
+    plan=read("SELECT * FROM budget_plans WHERE id=?",(int(budget_id),))
+    if plan.empty:
+        raise ValueError("Budget not found.")
+    budget_type=str(plan.iloc[0]["budget_type"])
+    alloc=v21_strategy_allocations(budget_type,strategy)
+    stamp=datetime.now().isoformat(timespec="seconds")
+    write(lambda c:c.execute("""UPDATE budget_plans
+        SET monthly_net_income=?,strategy=?,investment_percent=?,
+            retirement_percent=?,savings_percent=?,updated_at=?
+        WHERE id=?""",
+        (float(income),strategy,alloc["invest"],alloc["retirement"],
+         alloc["savings"],stamp,int(budget_id))))
+
+def v21_budget_math(plan,expenses):
+    income=float(plan.get("monthly_net_income",0) or 0)
+    expense_total=float(pd.to_numeric(expenses["monthly_amount"],errors="coerce").fillna(0).sum()) if not expenses.empty else 0.0
+    surplus=income-expense_total
+    positive=max(0.0,surplus)
+
+    invest_pct=float(plan.get("investment_percent",0) or 0)
+    retire_pct=float(plan.get("retirement_percent",0) or 0)
+    savings_pct=float(plan.get("savings_percent",0) or 0)
+
+    invest=positive*invest_pct/100.0
+    retirement=positive*retire_pct/100.0
+    savings=positive*savings_pct/100.0
+    allocated=invest+retirement+savings
+    remaining=max(0.0,positive-allocated)
+
+    return {
+        "income":income,"expenses":expense_total,"surplus":surplus,
+        "invest":invest,"retirement":retirement,"savings":savings,
+        "remaining":remaining
+    }
+
+def v21_render_donut(plan,expenses,maths,is_dark):
+    """Sullivan-style responsive circle budget visualization."""
+    card_bg="#102338" if is_dark else "#FFFFFF"
+    plot_bg="#0A1828" if is_dark else "#F6FAFD"
+    border="#294763" if is_dark else "#DCE8F2"
+    text_main="#F7FBFF" if is_dark else "#102A43"
+    text_muted="#9FB4C8" if is_dark else "#718499"
+
+    palette=[
+        "#2F80ED","#22C879","#F4A11A","#7C5CFC","#F25563","#24B6C9",
+        "#E07A5F","#8CB369","#B565A7","#6C8EBF","#D4A72C","#5F6CAF"
+    ]
+
+    pieces=[]
+    if not expenses.empty:
+        grouped=expenses.groupby("category")["monthly_amount"].sum().sort_values(ascending=False)
+        for idx,(category,amount) in enumerate(grouped.items()):
+            if float(amount)>0:
+                pieces.append((str(category),float(amount),palette[idx%len(palette)]))
+
+    alloc=v21_strategy_allocations(str(plan["budget_type"]),str(plan["strategy"]))
+    if maths["invest"]>0:
+        pieces.append((alloc["invest_label"],maths["invest"],"#3C9DFF"))
+    if maths["retirement"]>0:
+        pieces.append((alloc["retirement_label"],maths["retirement"],"#8A63F6"))
+    if maths["savings"]>0:
+        pieces.append((alloc["savings_label"],maths["savings"],"#20C77A"))
+    if maths["remaining"]>0:
+        pieces.append(("Unallocated",maths["remaining"],"#8FA2B5"))
+
+    total=sum(v for _,v,_ in pieces)
+    if total<=0:
+        pieces=[("Unallocated income",max(maths["income"],1.0),"#8FA2B5")]
+        total=sum(v for _,v,_ in pieces)
+
+    cx,cy,r=180,180,118
+    circumference=2*math.pi*r
+    offset=0.0
+    arcs=[]
+    legend=[]
+    for label,value,color in pieces:
+        fraction=value/total if total else 0
+        dash=fraction*circumference
+        pct=fraction*100
+        arcs.append(
+            f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="{color}" '
+            f'stroke-width="34" stroke-linecap="butt" '
+            f'stroke-dasharray="{dash:.2f} {circumference-dash:.2f}" '
+            f'stroke-dashoffset="{-offset:.2f}" transform="rotate(-90 {cx} {cy})">'
+            f'<title>{label}: ${value:,.2f} ({pct:.1f}%)</title></circle>'
+        )
+        offset+=dash
+        legend.append(
+            f'<div style="display:flex;justify-content:space-between;gap:12px;align-items:center;'
+            f'padding:8px 0;border-bottom:1px solid {border};">'
+            f'<span style="color:{text_main};font-size:.82rem;">'
+            f'<b style="color:{color};">●</b>&nbsp; {label}</span>'
+            f'<span style="color:{text_muted};font-size:.80rem;font-weight:700;">'
+            f'${value:,.2f} · {pct:.1f}%</span></div>'
+        )
+
+    html=textwrap.dedent(f"""
+    <style>
+      html,body{{margin:0;padding:0;background:transparent;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}}
+      *{{box-sizing:border-box;}}
+    </style>
+    <div style="background:{card_bg};border:1px solid {border};border-radius:24px;padding:18px 20px;
+                box-shadow:0 14px 34px rgba(0,0,0,.07);">
+      <div style="display:flex;gap:22px;align-items:center;flex-wrap:wrap;">
+        <div style="flex:0 0 360px;max-width:100%;">
+          <svg viewBox="0 0 360 360" width="100%" style="display:block;">
+            <circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="{plot_bg}" stroke-width="34"/>
+            {''.join(arcs)}
+            <text x="{cx}" y="{cy-10}" text-anchor="middle" fill="{text_muted}" font-size="14">Monthly income</text>
+            <text x="{cx}" y="{cy+20}" text-anchor="middle" fill="{text_main}" font-size="26" font-weight="900">${maths["income"]:,.0f}</text>
+            <text x="{cx}" y="{cy+44}" text-anchor="middle" fill="{text_muted}" font-size="12">
+              {str(plan["budget_type"])} budget
+            </text>
+          </svg>
+        </div>
+        <div style="flex:1;min-width:260px;">
+          <div style="color:{text_main};font-size:1rem;font-weight:900;margin-bottom:5px;">Where your money goes</div>
+          <div style="color:{text_muted};font-size:.78rem;margin-bottom:8px;">
+            Percentages are based on planned monthly income after tax.
+          </div>
+          {''.join(legend)}
+        </div>
+      </div>
+    </div>
+    """).strip()
+
+    components.html(html,height=470,scrolling=False)
+
+def v21_render_budgeting():
+    st.subheader("Budgeting")
+    st.caption(
+        "Build a connected Personal or Business budget from monthly net income, expenses, and your preferred strategy for the money left over."
+    )
+
+    if not v171_is_signed_in():
+        st.info("Sign in to create and save budgets.")
+        return
+
+    is_dark=st.session_state.get("v19_ui_theme")=="Dark"
+    plans=v21_budget_plans()
+    income_base=v204_budget_income_baseline()
+    default_type="Business" if current_company() is not None else "Personal"
+
+    setup_tab, dashboard_tab = st.tabs(["Build / Edit Budget","Budget Dashboard"])
+
+    with setup_tab:
+        st.markdown("### 1 · Choose your budget")
+        budget_type=st.radio(
+            "Budget type",
+            ["Personal","Business"],
+            index=0 if default_type=="Personal" else 1,
+            horizontal=True,
+            key="v21_budget_type"
+        )
+        if budget_type != default_type:
+            st.caption(
+                f"You are currently in a **{default_type} workspace**. Sullivan will still label this plan as {budget_type}, "
+                "but all records remain isolated inside the current workspace."
+            )
+
+        st.markdown("### 2 · Enter monthly net income")
+        st.caption(
+            "**Need your net?** Go to **Income & Payroll** and enter your gross income. "
+            "Sullivan can estimate your net using your selected tax region."
+        )
+
+        suggested=float(income_base.get("monthly_net",0) or 0)
+        use_connected=st.checkbox(
+            f"Use connected Sullivan net income (${suggested:,.2f}/month)",
+            value=suggested>0,
+            disabled=suggested<=0,
+            key="v21_use_connected_income"
+        )
+        monthly_income=st.number_input(
+            "Monthly net income",
+            min_value=0.0,
+            value=round(suggested if use_connected else 0.0,2),
+            step=100.0,
+            format="%.2f",
+            key="v21_monthly_income"
+        )
+
+        st.markdown("### 3 · Add monthly expenses")
+        categories=V21_PERSONAL_EXPENSES if budget_type=="Personal" else V21_BUSINESS_EXPENSES
+
+        if "v21_draft_expenses" not in st.session_state:
+            st.session_state["v21_draft_expenses"]=[]
+
+        e1,e2,e3=st.columns([1,1.3,.8])
+        category=e1.selectbox("Category",categories,key="v21_exp_category")
+        description=e2.text_input("Expense",placeholder="Rent, groceries, insurance…",key="v21_exp_desc")
+        amount=e3.number_input("Monthly amount",min_value=0.0,step=25.0,format="%.2f",key="v21_exp_amt")
+        essential=st.checkbox("Essential / fixed expense",value=True,key="v21_exp_essential")
+
+        if st.button("＋ Add expense",key="v21_draft_add",width="content"):
+            if amount<=0:
+                st.error("Enter an expense amount.")
+            else:
+                st.session_state["v21_draft_expenses"].append({
+                    "category":category,
+                    "description":description.strip(),
+                    "monthly_amount":float(amount),
+                    "essential":bool(essential)
+                })
+                st.rerun()
+
+        draft=st.session_state["v21_draft_expenses"]
+        if draft:
+            ddf=pd.DataFrame(draft)
+            st.dataframe(
+                ddf.rename(columns={
+                    "category":"Category","description":"Expense",
+                    "monthly_amount":"Monthly amount","essential":"Essential"
+                }),
+                width="stretch",hide_index=True,
+                column_config={"Monthly amount":st.column_config.NumberColumn(format="$%.2f")}
+            )
+
+            labels=[
+                f'{i+1}. {d["description"] or d["category"]} · ${d["monthly_amount"]:,.2f}'
+                for i,d in enumerate(draft)
+            ]
+            remove_choice=st.selectbox("⋯ Expense options",[""]+labels,key="v21_draft_manage")
+            if remove_choice:
+                idx=labels.index(remove_choice)
+                if st.button("Delete selected expense",key="v21_draft_delete"):
+                    st.session_state["v21_draft_expenses"].pop(idx)
+                    st.rerun()
+
+        draft_expenses=sum(float(d["monthly_amount"]) for d in draft)
+        draft_surplus=monthly_income-draft_expenses
+
+        s1,s2,s3=st.columns(3)
+        s1.metric("Net income",f"${monthly_income:,.2f}")
+        s2.metric("Expenses",f"${draft_expenses:,.2f}")
+        s3.metric("Money left",f"${draft_surplus:,.2f}")
+
+        st.markdown("### 4 · What should Sullivan do with extra income?")
+
+        if budget_type=="Personal":
+            strategy=st.radio(
+                "Choose your planning style",
+                ["Aggressively invest extra income","Slowly invest + prioritize retirement"],
+                captions=[
+                    "Put a larger share of monthly surplus toward investing while still funding retirement and reserves.",
+                    "Invest more gradually while directing a larger share toward retirement and savings."
+                ],
+                key="v21_strategy_personal"
+            )
+        else:
+            strategy=st.radio(
+                "Choose your business planning style",
+                ["Aggressive growth","Steady growth + stronger cash reserves"],
+                captions=[
+                    "Direct more surplus toward business reinvestment and expansion.",
+                    "Reinvest more slowly while keeping a larger cash reserve."
+                ],
+                key="v21_strategy_business"
+            )
+
+        alloc=v21_strategy_allocations(budget_type,strategy)
+        positive=max(0.0,draft_surplus)
+        p1,p2,p3=st.columns(3)
+        p1.metric(alloc["invest_label"],f"${positive*alloc['invest']/100:,.2f}",f"{alloc['invest']:.0f}% of surplus")
+        if budget_type=="Personal":
+            p2.metric(alloc["retirement_label"],f"${positive*alloc['retirement']/100:,.2f}",f"{alloc['retirement']:.0f}% of surplus")
+        else:
+            p2.metric("Growth reserve",f"${positive*alloc['savings']/100:,.2f}",f"{alloc['savings']:.0f}% of surplus")
+        p3.metric(alloc["savings_label"],f"${positive*alloc['savings']/100:,.2f}",f"{alloc['savings']:.0f}% of surplus")
+
+        if draft_surplus<0:
+            st.error(
+                f"This draft is **${abs(draft_surplus):,.2f} over budget each month**. "
+                "Reduce expenses or increase net income before allocating money to investing, retirement, or reserves."
+            )
+        else:
+            st.info(
+                "These are planning allocations, not investment recommendations. "
+                "The future Wealth section will let you customize retirement accounts, investment goals, risk, and tax-aware strategies."
+            )
+
+        plan_name=st.text_input(
+            "Budget name",
+            value=f"{budget_type} Monthly Budget",
+            key="v21_plan_name"
+        )
+        notes=st.text_area(
+            "Budget notes",
+            placeholder="Goals, priorities, upcoming changes…",
+            key="v21_budget_notes"
+        )
+
+        if st.button("Save Sullivan Budget",type="primary",width="stretch",key="v21_save_budget"):
+            if monthly_income<=0:
+                st.error("Enter monthly net income.")
+            elif not plan_name.strip():
+                st.error("Enter a budget name.")
+            else:
+                bid=v21_create_budget(plan_name,budget_type,monthly_income,strategy,notes)
+                for d in draft:
+                    v21_add_expense(
+                        bid,d["category"],d["description"],
+                        d["monthly_amount"],d["essential"]
+                    )
+                st.session_state["v21_draft_expenses"]=[]
+                st.success("Budget saved. Open Budget Dashboard to see the full allocation.")
+                st.rerun()
+
+    with dashboard_tab:
+        plans=v21_budget_plans()
+        if plans.empty:
+            st.info("Create your first Sullivan Budget in **Build / Edit Budget**.")
+        else:
+            labels={
+                f'{r["plan_name"]} · {r["budget_type"]} · ${float(r["monthly_net_income"]):,.2f}/mo':int(r["id"])
+                for _,r in plans.iterrows()
+            }
+            chosen=st.selectbox("Budget",list(labels.keys()),key="v21_dashboard_budget")
+            bid=labels[chosen]
+            plan=plans[plans["id"]==bid].iloc[0]
+            expenses=v21_budget_expenses(bid)
+            maths=v21_budget_math(plan,expenses)
+            alloc=v21_strategy_allocations(str(plan["budget_type"]),str(plan["strategy"]))
+
+            h1,h2,h3,h4=st.columns(4)
+            h1.metric("Monthly net income",f"${maths['income']:,.2f}")
+            h2.metric("Monthly expenses",f"${maths['expenses']:,.2f}")
+            h3.metric("Surplus",f"${maths['surplus']:,.2f}")
+            savings_rate=(max(0.0,maths["surplus"])/maths["income"]*100) if maths["income"]>0 else 0
+            h4.metric("Surplus rate",f"{savings_rate:.1f}%")
+
+            v21_render_donut(plan,expenses,maths,is_dark)
+
+            st.markdown("### Monthly allocation")
+            rows=[]
+            if not expenses.empty:
+                grouped=expenses.groupby("category")["monthly_amount"].sum().sort_values(ascending=False)
+                for cat,amt in grouped.items():
+                    rows.append({"Category":str(cat),"Monthly amount":float(amt),"Type":"Expense"})
+            if maths["invest"]>0:
+                rows.append({"Category":alloc["invest_label"],"Monthly amount":maths["invest"],"Type":"Future allocation"})
+            if maths["retirement"]>0:
+                rows.append({"Category":alloc["retirement_label"],"Monthly amount":maths["retirement"],"Type":"Future allocation"})
+            if maths["savings"]>0:
+                rows.append({"Category":alloc["savings_label"],"Monthly amount":maths["savings"],"Type":"Future allocation"})
+
+            if rows:
+                allocation_df=pd.DataFrame(rows)
+                allocation_df["Percent of income"]=allocation_df["Monthly amount"].apply(
+                    lambda x:(float(x)/maths["income"]*100) if maths["income"]>0 else 0
+                )
+                st.dataframe(
+                    allocation_df,
+                    width="stretch",hide_index=True,
+                    column_config={
+                        "Monthly amount":st.column_config.NumberColumn(format="$%.2f"),
+                        "Percent of income":st.column_config.NumberColumn(format="%.1f%%")
+                    }
+                )
+
+            st.markdown("### Strategy")
+            st.write(f"**{plan['strategy']}**")
+            if str(plan["budget_type"])=="Personal":
+                st.write(
+                    f"Of your monthly surplus, Sullivan currently plans approximately "
+                    f"**{alloc['invest']:.0f}% for investing**, **{alloc['retirement']:.0f}% for retirement**, "
+                    f"and **{alloc['savings']:.0f}% for savings/reserves**."
+                )
+            else:
+                st.write(
+                    f"Of your monthly surplus, Sullivan currently plans approximately "
+                    f"**{alloc['invest']:.0f}% for business reinvestment** and "
+                    f"**{alloc['savings']:.0f}% for cash reserves**."
+                )
+
+            st.markdown("### ⋯ Manage budget")
+            manage=st.selectbox(
+                "Budget options",
+                ["","Edit income / strategy","Delete budget"],
+                key="v21_budget_options"
+            )
+            if manage=="Edit income / strategy":
+                new_income=st.number_input(
+                    "Monthly net income",
+                    min_value=0.0,
+                    value=float(plan["monthly_net_income"]),
+                    step=100.0,
+                    format="%.2f",
+                    key="v21_edit_income"
+                )
+                strategy_options=(
+                    ["Aggressively invest extra income","Slowly invest + prioritize retirement"]
+                    if str(plan["budget_type"])=="Personal"
+                    else ["Aggressive growth","Steady growth + stronger cash reserves"]
+                )
+                current_strategy=str(plan["strategy"])
+                si=strategy_options.index(current_strategy) if current_strategy in strategy_options else 0
+                new_strategy=st.selectbox(
+                    "Strategy",strategy_options,index=si,key="v21_edit_strategy"
+                )
+                if st.button("Save budget changes",type="primary",key="v21_save_changes"):
+                    v21_update_budget(bid,new_income,new_strategy)
+                    st.success("Budget updated.")
+                    st.rerun()
+
+            if manage=="Delete budget":
+                st.warning("This permanently deletes the budget and its saved expenses.")
+                confirm=st.checkbox("Confirm delete budget",key="v21_confirm_delete")
+                if st.button("Delete budget",disabled=not confirm,key="v21_delete_budget"):
+                    def _delete(c):
+                        c.execute("DELETE FROM budget_expenses WHERE budget_id=?",(bid,))
+                        c.execute("DELETE FROM budget_plans WHERE id=?",(bid,))
+                    write(_delete)
+                    st.success("Budget deleted.")
+                    st.rerun()
+
+            st.divider()
+            st.markdown("### Add another expense to this budget")
+            cats=V21_PERSONAL_EXPENSES if str(plan["budget_type"])=="Personal" else V21_BUSINESS_EXPENSES
+            x1,x2,x3=st.columns([1,1.3,.8])
+            cat=x1.selectbox("Category",cats,key="v21_saved_cat")
+            desc=x2.text_input("Expense",key="v21_saved_desc")
+            amt=x3.number_input("Monthly amount",min_value=0.0,step=25.0,key="v21_saved_amt")
+            if st.button("Add to budget",key="v21_saved_add"):
+                if amt<=0:
+                    st.error("Enter an amount.")
+                else:
+                    v21_add_expense(bid,cat,desc,amt,True)
+                    st.rerun()
+
+            expenses=v21_budget_expenses(bid)
+            if not expenses.empty:
+                exp_labels={
+                    f'{r["description"] or r["category"]} · ${float(r["monthly_amount"]):,.2f}':int(r["id"])
+                    for _,r in expenses.iterrows()
+                }
+                exp_choice=st.selectbox("⋯ Expense options",[""]+list(exp_labels.keys()),key="v21_saved_exp_manage")
+                if exp_choice:
+                    eid=exp_labels[exp_choice]
+                    if st.button("Delete selected expense",key=f"v21_saved_exp_delete_{eid}"):
+                        write(lambda c:c.execute("DELETE FROM budget_expenses WHERE id=?",(eid,)))
+                        st.success("Expense deleted.")
+                        st.rerun()
+
 def v203_advisor_focus_areas(snapshot):
     areas = []
     if snapshot["ar_overdue"] > 0:
@@ -9028,7 +9568,7 @@ with st.sidebar:
         "Support questions do not use your normal AI points."
     )
 
-main_sections=st.tabs(["Home","Advanced","Income & Payroll","Money In","Money Out","Bank","Taxes","Reports","Insights","Finance","Team","Plan & AI","Settings"])
+main_sections=st.tabs(["Home","Advanced","Income & Payroll","Budgeting","Money In","Money Out","Bank","Taxes","Reports","Insights","Finance","Team","Plan & AI","Settings"])
 
 
 with main_sections[0]:
@@ -9037,26 +9577,29 @@ with main_sections[2]:
     v204_render_income_payroll()
 
 with main_sections[3]:
-    sales_tabs=st.tabs(["Customers","Estimates","Invoices","Credit Notes","Recurring","Statements"])
+    v21_render_budgeting()
+
 with main_sections[4]:
-    expense_tabs=st.tabs(["Vendors","Purchase Orders","Bills","Documents"])
+    sales_tabs=st.tabs(["Customers","Estimates","Invoices","Credit Notes","Recurring","Statements"])
 with main_sections[5]:
-    banking_tabs=st.tabs(["Bank Activity","Reconciliation"])
+    expense_tabs=st.tabs(["Vendors","Purchase Orders","Bills","Documents"])
 with main_sections[6]:
-    tax_tabs=st.tabs(["Tax Center"])
+    banking_tabs=st.tabs(["Bank Activity","Reconciliation"])
 with main_sections[7]:
-    report_tabs=st.tabs(["Financial Reports","Money Owed / Bills Owed"])
+    tax_tabs=st.tabs(["Tax Center"])
 with main_sections[8]:
+    report_tabs=st.tabs(["Financial Reports","Money Owed / Bills Owed"])
+with main_sections[9]:
     v202_render_business_intelligence()
 
-with main_sections[9]:
+with main_sections[10]:
     finance_sections=st.tabs(["Debt & Financing","Assets & Equity"])
     with finance_sections[0]:
         v20_render_finance()
     with finance_sections[1]:
         v201_render_assets_equity()
 
-with main_sections[10]:
+with main_sections[11]:
     st.subheader("Team")
 
     if not v171_is_signed_in():
@@ -9117,7 +9660,7 @@ with main_sections[10]:
             else:
                 st.info("Only an Owner or Manager can invite employees.")
 
-with main_sections[11]:
+with main_sections[12]:
     st.subheader("Plan & AI")
     st.caption("Manage your Sullivan membership, team seats, billing status, and AI usage.")
 
@@ -9372,7 +9915,7 @@ with main_sections[1]:
         "Accounting Periods","Smart Close","Integrity Center","Audit Trail","Accountant Export"
     ])
 
-with main_sections[12]:
+with main_sections[13]:
     st.subheader("Settings")
     st.caption("Manage your Sullivan preferences, workspaces, account details, and support options.")
 
@@ -9609,6 +10152,11 @@ with home_tabs[0]:
         f"🌎 **Tax region: {home_region}, {home_country}**  ·  "
         "Sullivan uses this for supported income, payroll, and tax estimates. "
         "To change it, go to **Settings → Preferences → Tax Region**."
+    )
+    st.info(
+        "💰 **Build a budget:** Open **Budgeting** to turn your monthly net income into expenses, "
+        "savings, investing, retirement, or business-growth allocations. "
+        "If you only know your gross income, use **Income & Payroll** first to estimate net."
     )
 
     kpis=[
