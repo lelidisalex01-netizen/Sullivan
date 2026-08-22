@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 import math
 import html
 
-st.set_page_config(page_title="Sullivan V21.2", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V21.2.2", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -4291,7 +4291,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V21.2</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V21.2.2</span></div>",unsafe_allow_html=True)
 
 
 
@@ -10039,11 +10039,40 @@ def v212_personal_planning():
     finance_tabs=st.tabs(["Debt & Loans","Goals","Retirement"])
     with finance_tabs[0]:
         st.info(
-            "Personal debt uses Sullivan's existing Finance engine. "
-            "Open **Wealth → Wealth Plan** to tell Sullivan your highest debt rate, "
-            "or use a Personal workspace Finance record for detailed loan tracking."
+            "Personal debt stays connected to Sullivan without duplicating the full Business Finance workspace. "
+            "This page gives you a clean personal debt overview while keeping company financing tools separate."
         )
-        v20_render_finance()
+
+        personal_fin=v20_finance_summary()
+        d1,d2,d3,d4=st.columns(4)
+        d1.metric("Tracked debt",f"${float(personal_fin.get('total_debt',0) or 0):,.2f}")
+        d2.metric("Monthly debt service",f"${float(personal_fin.get('monthly_debt_service',0) or 0):,.2f}")
+        d3.metric("Interest YTD",f"${float(personal_fin.get('interest_ytd',0) or 0):,.2f}")
+        d4.metric("Assets tracked",f"${float(personal_fin.get('asset_book',0) or 0):,.2f}")
+
+        debt_rows=read("""SELECT id,name,financing_type,lender,current_balance,
+                                annual_interest_rate,scheduled_payment,next_payment_date,status
+                         FROM financing_accounts
+                         WHERE status='Active'
+                         ORDER BY current_balance DESC,id DESC""")
+        if debt_rows.empty:
+            st.caption("No personal financing accounts are recorded in this workspace yet.")
+        else:
+            st.dataframe(
+                debt_rows,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "current_balance":st.column_config.NumberColumn("Balance",format="$%.2f"),
+                    "annual_interest_rate":st.column_config.NumberColumn("Rate",format="%.2f%%"),
+                    "scheduled_payment":st.column_config.NumberColumn("Payment",format="$%.2f"),
+                }
+            )
+
+        st.caption(
+            "Detailed personal debt creation will get its own Personal workflow so it does not share "
+            "widget state with Business Finance."
+        )
 
     with finance_tabs[1]:
         v212_card_grid([
@@ -10606,7 +10635,14 @@ with main_sections[4]:
         v212_render_ai_home()
     with ai_tabs[2]:
         st.subheader("Free Sullivan Help")
-        v196_render_support_ai()
+        st.info(
+            "Sullivan's free product-help assistant is available under **Settings → Help & Support**. "
+            "It does not use your normal AI Credits."
+        )
+        st.caption(
+            "Keeping the interactive Help assistant in one place prevents duplicate Streamlit widget state "
+            "while still making it easy to find from the Sullivan AI hub."
+        )
 
 with business_tabs[9]:
     st.subheader("Team")
