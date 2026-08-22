@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 import math
 import html
 
-st.set_page_config(page_title="Sullivan V21.2", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V21.2.1", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -9976,7 +9976,7 @@ with main_sections[1]:
         st.caption("A simplified personal financial summary will live here.")
 
 with main_sections[2]:
-    business_tabs=st.tabs(["Overview","Money In","Money Out","Bank","Accounting","Payroll & Taxes","Finance","Insights","Reports","Team"])
+    business_tabs=st.tabs(["Overview","Money In","Money Out","Bank","Accounting","Payroll & Taxes","Finance","Insights","Business → Reports","Team"])
     with business_tabs[0]:
         st.subheader("Business Finance")
         st.caption("Run the company from one hub — cash flow, accounting, payroll, taxes, financing and reporting.")
@@ -10010,19 +10010,10 @@ with main_sections[4]:
 
 
 with main_sections[0]:
+    # V21.2.1 — RESTORED FULL SULLIVAN DASHBOARD.
+    # The V21.2 hub restructure must never replace the dashboard.
+    # Existing dashboard content below continues rendering inside this container.
     home_tabs=[st.container()]
-    st.markdown("### Your Sullivan financial system")
-    st.caption("Everything is now grouped into three clear financial areas while keeping the tools and records you already use.")
-    h1,h2,h3=st.columns(3)
-    with h1:
-        st.markdown("#### 👤 Personal")
-        st.write("Income, taxes, budgeting, debt, goals and retirement.")
-    with h2:
-        st.markdown("#### 🏢 Business")
-        st.write("Accounting, cash flow, payroll, taxes, finance, insights and team tools.")
-    with h3:
-        st.markdown("#### 📈 Wealth")
-        st.write("Investing, real estate, business building and your long-term wealth roadmap.")
 with personal_tabs[1]:
     v204_render_income_payroll()
 
@@ -10607,9 +10598,9 @@ with home_tabs[0]:
         "To change it, go to **Settings → Preferences → Tax Region**."
     )
     st.info(
-        "💰 **Build a budget:** Open **Budgeting** to turn your monthly net income into expenses, "
+        "💰 **Build a budget:** Open **Personal → Budgeting** to turn your monthly net income into expenses, "
         "savings, investing, retirement, or business-growth allocations. "
-        "If you only know your gross income, use **Income & Payroll** first to estimate net."
+        "If you only know your gross income, use **Personal → Income & Taxes** first to estimate net."
     )
 
     kpis=[
@@ -10657,20 +10648,20 @@ with home_tabs[0]:
         st.markdown('<div class="section-heading">Quick actions</div>',unsafe_allow_html=True)
         a,b,c=st.columns(3,gap="small")
         if a.button("Send invoice",use_container_width=True):
-            st.session_state["v13_destination"]="Money In → Invoices"; st.rerun()
+            st.session_state["v13_destination"]="Business → Money In → Invoices"; st.rerun()
         if b.button("Enter a bill",use_container_width=True):
-            st.session_state["v13_destination"]="Money Out → Bills"; st.rerun()
+            st.session_state["v13_destination"]="Business → Money Out → Bills"; st.rerun()
         if c.button("Record payment",use_container_width=True):
-            st.session_state["v13_destination"]="Money In → Invoices"; st.rerun()
+            st.session_state["v13_destination"]="Business → Money In → Invoices"; st.rerun()
         st.markdown('<div class="quick-labels"><span>Create & send</span><span>Add a bill to pay</span><span>Customer paid you</span></div>',unsafe_allow_html=True)
 
         d,e,f=st.columns(3,gap="small")
         if d.button("Match bank",use_container_width=True):
-            st.session_state["v13_destination"]="Bank → Reconciliation"; st.rerun()
+            st.session_state["v13_destination"]="Business → Bank → Reconciliation"; st.rerun()
         if e.button("Add expense",use_container_width=True):
-            st.session_state["v13_destination"]="Money Out → Bills"; st.rerun()
+            st.session_state["v13_destination"]="Business → Money Out → Bills"; st.rerun()
         if f.button("See reports",use_container_width=True):
-            st.session_state["v13_destination"]="Reports"; st.rerun()
+            st.session_state["v13_destination"]="Business → Reports"; st.rerun()
 
         if st.session_state.get("v13_destination"):
             st.info("Next step: **"+st.session_state["v13_destination"]+"**")
