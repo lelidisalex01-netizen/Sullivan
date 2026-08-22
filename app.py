@@ -13,7 +13,7 @@ import stripe
 import requests
 from pydantic import BaseModel, Field
 
-st.set_page_config(page_title="Sullivan V20.4.2", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V20.4.3", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -4246,7 +4246,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V20.4.2</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V20.4.3</span></div>",unsafe_allow_html=True)
 
 
 
@@ -7264,6 +7264,22 @@ def v202_render_financial_position(snapshot, is_dark):
 # V20.3 — PERSONALIZED SULLIVAN BUSINESS ADVISOR
 # ============================================================
 
+def v2043_delete_record_control(table, id_col, label_col, title):
+    df=read(f"SELECT * FROM {table} ORDER BY {id_col} DESC")
+    if df.empty:
+        return
+    options={f"{str(r.get(label_col) or '#'+str(int(r[id_col])))} · #{int(r[id_col])}":int(r[id_col]) for _,r in df.iterrows()}
+    choice=st.selectbox(f"⋯ {title} options",[""]+list(options.keys()),key=f"v2043_manage_{table}")
+    if choice:
+        rid=options[choice]
+        with st.expander("⋯ Options",expanded=True):
+            st.warning(f"Delete this {title.lower()} only if it was created by mistake. This cannot be undone.")
+            ok=st.checkbox("Confirm delete",key=f"v2043_confirm_{table}_{rid}")
+            if st.button(f"Delete {title.lower()}",disabled=not ok,key=f"v2043_delete_{table}_{rid}"):
+                write(lambda c:c.execute(f"DELETE FROM {table} WHERE {id_col}=?",(rid,)))
+                st.success(f"{title} deleted.")
+                st.rerun()
+
 # ============================================================
 # V20.4 — REGION, INCOME & PAYROLL
 # ============================================================
@@ -7338,6 +7354,24 @@ def v204_virginia_income_tax(gross, filing_status="Single"):
         [(3000,.02),(5000,.03),(17000,.05),(10**12,.0575)]
     )
 
+def v204_canada_federal_tax_2026(gross):
+    gross=max(0.0,float(gross or 0))
+    basic=v204_progressive_tax(gross,[(58523,.14),(117045,.205),(181440,.26),(258482,.29),(10**12,.33)])
+    credits=(16452.0+min(gross,1501.0))*.14
+    return max(0.0,basic-credits)
+
+def v204_quebec_income_tax_2026(gross):
+    gross=max(0.0,float(gross or 0))
+    basic=v204_progressive_tax(gross,[(54345,.14),(108680,.19),(132245,.24),(10**12,.2575)])
+    return max(0.0,basic-(18952.0*.14))
+
+def v204_quebec_payroll_2026(gross):
+    gross=max(0.0,float(gross or 0))
+    qpp=max(0.0,min(gross,74600.0)-3500.0)*.063 + max(0.0,min(gross,85000.0)-74600.0)*.04
+    ei=min(gross,68900.0)*.013
+    qpip=min(gross,103000.0)*.00430
+    return qpp,ei,qpip
+
 def v204_tax_estimate(annual_gross, country, region, filing_status="Single"):
     gross=max(0.0,float(annual_gross or 0))
     result={"federal":0.0,"regional":0.0,"social":0.0,"medicare":0.0,
@@ -7353,6 +7387,14 @@ def v204_tax_estimate(annual_gross, country, region, filing_status="Single"):
             result["note"]="2026 U.S. federal + Virginia planning estimate."
         else:
             result["note"]=f"2026 U.S. federal payroll taxes are modeled. {region} income tax is not yet fully modeled, so Sullivan does not invent a state-tax amount."
+    elif country=="Canada" and region=="Quebec":
+        result["federal"]=v204_canada_federal_tax_2026(gross)*.835
+        result["regional"]=v204_quebec_income_tax_2026(gross)
+        qpp,ei,qpip=v204_quebec_payroll_2026(gross)
+        result["qpp"],result["ei"],result["qpip"]=qpp,ei,qpip
+        result["social"]=qpp+ei+qpip
+        result["supported"]=True
+        result["note"]="2026 Canada federal + Quebec income tax, QPP, Quebec EI and QPIP planning estimate."
     else:
         result["note"]=f"{country} · {region} is saved as this workspace's tax region. Detailed payroll tax calculation for this region is not yet enabled in V20.4."
     result["total_employee_tax"]=result["federal"]+result["regional"]+result["social"]+result["medicare"]
@@ -7362,6 +7404,23 @@ def v204_tax_estimate(annual_gross, country, region, filing_status="Single"):
 
 def v204_periods_per_year(frequency):
     return {"Weekly":52,"Biweekly":26,"Semimonthly":24,"Monthly":12,"Annual":1}.get(str(frequency),12)
+
+def v204_tax_breakdown_rows(tax, periods, country, region):
+    periods=max(1,int(periods or 1))
+    if country=="Canada" and region=="Quebec":
+        return [
+            ("Federal income tax",float(tax.get("federal",0))/periods,"Federal income tax after the Quebec abatement."),
+            ("Quebec income tax",float(tax.get("regional",0))/periods,"Quebec provincial income tax."),
+            ("QPP",float(tax.get("qpp",0))/periods,"Quebec Pension Plan contribution."),
+            ("Employment Insurance",float(tax.get("ei",0))/periods,"Quebec employee EI premium."),
+            ("QPIP",float(tax.get("qpip",0))/periods,"Quebec Parental Insurance Plan premium.")
+        ]
+    return [
+        ("Federal income tax",float(tax.get("federal",0))/periods,"Estimated federal income tax."),
+        (f"{region} income tax",float(tax.get("regional",0))/periods,"Estimated regional income tax where supported."),
+        ("Social Security / pension payroll tax",float(tax.get("social",0))/periods,"Employee payroll contribution."),
+        ("Medicare",float(tax.get("medicare",0))/periods,"Employee Medicare payroll tax where applicable.")
+    ]
 
 def v204_estimate_income_source(gross_per_period, frequency, country, region,
                                 filing_status="Single", other_deductions_per_period=0.0):
@@ -7503,6 +7562,19 @@ def v204_render_income_payroll():
                     f"**${budget_base['monthly_net']:,.2f}/month of estimated net income** "
                     "available as the starting income for the upcoming Budgeting module."
                 )
+                st.markdown("#### ⋯ Manage income")
+                income_opts={f'{r["source_name"]} · {r["frequency"]} · ${float(r["gross_amount"] or 0):,.2f}':int(r["id"]) for _,r in sources.iterrows()}
+                income_choice=st.selectbox("Choose income source",[""]+list(income_opts.keys()),key="v2043_income_manage")
+                if income_choice:
+                    income_id=income_opts[income_choice]
+                    with st.expander("⋯ Options",expanded=True):
+                        st.warning("Delete this income source only if it was created by mistake.")
+                        ok=st.checkbox("Confirm delete",key=f"v2043_income_confirm_{income_id}")
+                        if st.button("Delete income source",disabled=not ok,key=f"v2043_income_delete_{income_id}"):
+                            write(lambda c:c.execute("DELETE FROM income_sources WHERE id=?",(income_id,)))
+                            st.success("Income source deleted.")
+                            st.rerun()
+
         with right:
             st.markdown("### Gross → estimated net")
             st.caption(
@@ -7556,10 +7628,15 @@ def v204_render_income_payroll():
 
             if ga>0:
                 difference=max(0.0,ga-preview["net_per_period"])
-                st.write(
-                    f"About **${difference:,.2f}** per period is estimated to go to "
-                    "income/payroll taxes and other entered deductions."
-                )
+                st.markdown(f"### ${ga:,.2f} gross → approximately ${preview['net_per_period']:,.2f} net")
+                st.write(f"Estimated deductions: **${difference:,.2f} per {fr.lower()} pay period**.")
+                for label,amount,why in v204_tax_breakdown_rows(preview["tax"],v204_periods_per_year(fr),country,region):
+                    if amount>0.005:
+                        st.markdown(f"**{label}: ${amount:,.2f}**")
+                        st.caption(why)
+                if od>0:
+                    st.markdown(f"**Other deductions: ${od:,.2f}**")
+                    st.caption("Benefits, insurance, retirement contributions, or other deductions you entered.")
                 st.caption(preview["tax"]["note"])
 
             include_budget=st.checkbox(
@@ -10938,6 +11015,7 @@ with sales_tabs[1]:
 
 with sales_tabs[2]:
     st.subheader("Invoices")
+    v2043_delete_record_control("invoices","id","invoice_no","Invoice")
     st.caption("Customers created in the Customers tab appear here automatically.")
 
     c1,c2,c3=st.columns(3)
@@ -11172,6 +11250,7 @@ with expense_tabs[1]:
 
 with expense_tabs[2]:
     st.subheader("Bills")
+    v2043_delete_record_control("bills","id","bill_no","Bill")
     st.caption("Vendors created in the Vendors tab appear here automatically.")
 
     c1,c2,c3=st.columns(3)
