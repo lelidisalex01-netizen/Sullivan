@@ -12,8 +12,9 @@ from openai import OpenAI
 import stripe
 import requests
 from pydantic import BaseModel, Field
+import math
 
-st.set_page_config(page_title="Sullivan V21", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V21.0.1", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -4272,7 +4273,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V21</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V21.0.1</span></div>",unsafe_allow_html=True)
 
 
 
