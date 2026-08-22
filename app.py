@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 import math
 import html
 
-st.set_page_config(page_title="Sullivan V21.1.1", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V21.2", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -9947,41 +9947,112 @@ with st.sidebar:
         "Support questions do not use your normal AI points."
     )
 
-main_sections=st.tabs(["Home","Advanced","Income & Payroll","Budgeting","Wealth","Money In","Money Out","Bank","Taxes","Reports","Insights","Finance","Team","Plan & AI","Settings"])
+# V21.2 — Navigation restructure. Existing accounting/data logic is preserved; only presentation is regrouped.
+main_sections=st.tabs(["Home","Personal","Business","Wealth","Sullivan AI","Settings"])
+
+with main_sections[1]:
+    personal_tabs=st.tabs(["Overview","Income & Taxes","Budgeting","Expenses","Debt & Loans","Goals","Retirement","Personal Reports"])
+    with personal_tabs[0]:
+        st.subheader("Personal Finance")
+        st.caption("Your income, spending, debt, goals and long-term plan — organized in one place.")
+        pc1,pc2,pc3=st.columns(3)
+        pc1.info("**Income & Taxes**\n\nEstimate take-home income using your selected tax region.")
+        pc2.info("**Budgeting**\n\nTurn net income into a practical monthly plan.")
+        pc3.info("**Goals & Retirement**\n\nBuild toward savings, retirement and major personal goals.")
+    with personal_tabs[3]:
+        st.subheader("Personal Expenses")
+        st.caption("Your detailed personal spending tools will live here as Sullivan expands. Budget expenses remain available under Budgeting.")
+    with personal_tabs[4]:
+        st.subheader("Personal Debt & Loans")
+        st.caption("Personal debt planning will connect to Sullivan Finance without mixing your personal records with company books.")
+    with personal_tabs[5]:
+        st.subheader("Goals")
+        st.caption("Savings targets, purchase goals and milestone tracking are coming into this hub.")
+    with personal_tabs[6]:
+        st.subheader("Retirement")
+        st.caption("Retirement planning will connect your region, income, budget and Wealth plan.")
+    with personal_tabs[7]:
+        st.subheader("Personal Reports")
+        st.caption("A simplified personal financial summary will live here.")
+
+with main_sections[2]:
+    business_tabs=st.tabs(["Overview","Money In","Money Out","Bank","Accounting","Payroll & Taxes","Finance","Insights","Reports","Team"])
+    with business_tabs[0]:
+        st.subheader("Business Finance")
+        st.caption("Run the company from one hub — cash flow, accounting, payroll, taxes, financing and reporting.")
+        bc1,bc2,bc3=st.columns(3)
+        bc1.info("**Operate**\n\nMoney In, Money Out and Bank activity.")
+        bc2.info("**Account**\n\nLedger, journals, reconciliation, close and tax controls.")
+        bc3.info("**Grow**\n\nFinancing, business insights and team management.")
+
+with main_sections[3]:
+    wealth_tabs=st.tabs(["Wealth Dashboard","Stocks & ETFs","Real Estate","Build a Business","Retirement","Other Opportunities","Portfolio","Wealth Plan"])
+    for _idx,_title,_copy in [
+        (1,"Stocks & ETFs","Learn diversified investing, risk, compounding and how investing can fit your available income."),
+        (2,"Real Estate","Learn property investing, affordability, mortgages, rental analysis and market research."),
+        (3,"Build a Business","Explore business-building paths based on available capital, time, skills and risk."),
+        (4,"Retirement","Connect long-term investing with retirement goals and region-aware planning."),
+        (5,"Other Opportunities","Compare additional wealth-building approaches without cluttering your core plan."),
+        (6,"Portfolio","A future consolidated view of the assets and strategies you choose to track."),
+        (7,"Wealth Plan","Your saved Sullivan roadmap and allocation strategy live here as this hub expands.")
+    ]:
+        with wealth_tabs[_idx]:
+            st.subheader(_title)
+            st.caption(_copy)
+            st.info("This V21.2 section establishes the new Sullivan structure. The full specialized tools and Ask Sullivan experience arrive in the Wealth expansion next.")
+
+with main_sections[4]:
+    sullivan_ai_tabs=st.tabs(["Ask Sullivan","Plan & AI"])
+    with sullivan_ai_tabs[0]:
+        st.subheader("Sullivan AI")
+        st.caption("Get help using Sullivan. Specialized Personal, Business and Wealth assistants will plug into this hub.")
+        v196_render_support_ai()
 
 
 with main_sections[0]:
     home_tabs=[st.container()]
-with main_sections[2]:
+    st.markdown("### Your Sullivan financial system")
+    st.caption("Everything is now grouped into three clear financial areas while keeping the tools and records you already use.")
+    h1,h2,h3=st.columns(3)
+    with h1:
+        st.markdown("#### 👤 Personal")
+        st.write("Income, taxes, budgeting, debt, goals and retirement.")
+    with h2:
+        st.markdown("#### 🏢 Business")
+        st.write("Accounting, cash flow, payroll, taxes, finance, insights and team tools.")
+    with h3:
+        st.markdown("#### 📈 Wealth")
+        st.write("Investing, real estate, business building and your long-term wealth roadmap.")
+with personal_tabs[1]:
     v204_render_income_payroll()
 
-with main_sections[3]:
+with personal_tabs[2]:
     v21_render_budgeting()
 
-with main_sections[4]:
+with wealth_tabs[0]:
     v211_render_wealth()
 
-with main_sections[5]:
+with business_tabs[1]:
     sales_tabs=st.tabs(["Customers","Estimates","Invoices","Credit Notes","Recurring","Statements"])
-with main_sections[6]:
+with business_tabs[2]:
     expense_tabs=st.tabs(["Vendors","Purchase Orders","Bills","Documents"])
-with main_sections[7]:
+with business_tabs[3]:
     banking_tabs=st.tabs(["Bank Activity","Reconciliation"])
-with main_sections[8]:
+with business_tabs[5]:
     tax_tabs=st.tabs(["Tax Center"])
-with main_sections[9]:
+with business_tabs[8]:
     report_tabs=st.tabs(["Financial Reports","Money Owed / Bills Owed"])
-with main_sections[10]:
+with business_tabs[7]:
     v202_render_business_intelligence()
 
-with main_sections[11]:
+with business_tabs[6]:
     finance_sections=st.tabs(["Debt & Financing","Assets & Equity"])
     with finance_sections[0]:
         v20_render_finance()
     with finance_sections[1]:
         v201_render_assets_equity()
 
-with main_sections[12]:
+with business_tabs[9]:
     st.subheader("Team")
 
     if not v171_is_signed_in():
@@ -10042,7 +10113,7 @@ with main_sections[12]:
             else:
                 st.info("Only an Owner or Manager can invite employees.")
 
-with main_sections[13]:
+with sullivan_ai_tabs[1]:
     st.subheader("Plan & AI")
     st.caption("Manage your Sullivan membership, team seats, billing status, and AI usage.")
 
@@ -10290,14 +10361,14 @@ with main_sections[13]:
                     else:
                         st.dataframe(usage,use_container_width=True,hide_index=True)
 
-with main_sections[1]:
+with business_tabs[4]:
     accountant_tabs=st.tabs([
         "Import & Analyze","Question Queue","Chart of Accounts","Opening Balances",
         "Saved Ledger","General Ledger","Manual Journals","Corrections / Reversals",
         "Accounting Periods","Smart Close","Integrity Center","Audit Trail","Accountant Export"
     ])
 
-with main_sections[14]:
+with main_sections[5]:
     st.subheader("Settings")
     st.caption("Manage your Sullivan preferences, workspaces, account details, and support options.")
 
@@ -12563,4 +12634,4 @@ with accountant_tabs[12]:
         with open(path,"rb") as f:st.download_button("Download package",f.read(),"sullivan_v15_4_accountant_package.zip","application/zip")
 
 st.divider()
-st.caption("Sullivan V19 globally enforces closed accounting periods while retaining V12.3 automatic document numbering.")
+st.caption("Sullivan V21.2 reorganizes Personal, Business and Wealth while preserving the existing accounting controls and workspace isolation while retaining V12.3 automatic document numbering.")
