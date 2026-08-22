@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 import math
 import html
 
-st.set_page_config(page_title="Sullivan V21.1.1", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V21.2", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -152,6 +152,7 @@ AI_CREDIT_COSTS = {
     "reconciliation_assist": 5,
     "month_end_review": 15,
     "business_advisor": 8,
+    "wealth_research": 8,
 }
 
 RULES = [
@@ -4290,7 +4291,7 @@ def require_company_role(*roles):
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V21.1.1</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V21.2</span></div>",unsafe_allow_html=True)
 
 
 
@@ -9947,41 +9948,667 @@ with st.sidebar:
         "Support questions do not use your normal AI points."
     )
 
-main_sections=st.tabs(["Home","Advanced","Income & Payroll","Budgeting","Wealth","Money In","Money Out","Bank","Taxes","Reports","Insights","Finance","Team","Plan & AI","Settings"])
 
+# ============================================================
+# V21.2 — SULLIVAN HUB ARCHITECTURE
+# Keeps the original Home dashboard intact while organizing
+# Personal, Business, Wealth, Sullivan AI and Settings.
+# ============================================================
+def v212_theme():
+    dark = st.session_state.get("v19_ui_theme") == "Dark"
+    return {
+        "dark": dark,
+        "card": "#102338" if dark else "#FFFFFF",
+        "soft": "#0A1828" if dark else "#F5F9FD",
+        "border": "#294763" if dark else "#DCE8F2",
+        "text": "#F7FBFF" if dark else "#102A43",
+        "muted": "#9FB4C8" if dark else "#718499",
+    }
 
+def v212_card_grid(cards, columns=3):
+    theme=v212_theme()
+    cols=st.columns(columns)
+    for i,(icon,title,body,accent) in enumerate(cards):
+        with cols[i % columns]:
+            st.markdown(
+                f"""
+                <div style="
+                    background:{theme['card']};
+                    border:1px solid {theme['border']};
+                    border-radius:22px;
+                    padding:18px 18px;
+                    min-height:165px;
+                    box-shadow:0 12px 30px rgba(0,0,0,.055);
+                    margin-bottom:12px;
+                ">
+                    <div style="
+                        width:42px;height:42px;border-radius:13px;
+                        display:flex;align-items:center;justify-content:center;
+                        background:{accent}18;color:{accent};
+                        font-size:1.25rem;font-weight:900;
+                    ">{icon}</div>
+                    <div style="color:{theme['text']};font-size:1.02rem;font-weight:900;margin-top:12px;">
+                        {html.escape(title)}
+                    </div>
+                    <div style="color:{theme['muted']};font-size:.82rem;line-height:1.48;margin-top:6px;">
+                        {html.escape(body)}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+def v212_personal_overview():
+    st.subheader("Personal Finance")
+    st.caption("Your income, budget, debt, goals and long-term personal financial life in one place.")
+
+    if current_company() is not None:
+        st.warning(
+            "You are currently inside a **Company workspace**. Personal and company records stay separate. "
+            "Switch to **Personal** using the workspace switcher before entering private personal-finance data."
+        )
+    else:
+        st.success("Personal workspace active · private records remain separate from every company.")
+
+    base=v204_budget_income_baseline()
+    surplus,budget=v211_budget_surplus()
+    loans=v20_finance_summary()
+
+    a,b,c,d=st.columns(4)
+    a.metric("Estimated monthly net",f"${float(base.get('monthly_net',0) or 0):,.2f}")
+    b.metric("Budget money left",f"${float(surplus or 0):,.2f}")
+    c.metric("Tracked debt",f"${float(loans.get('total_debt',0) or 0):,.2f}")
+    d.metric("Tax region",f"{v204_region()[1]}")
+
+    v212_card_grid([
+        ("↗","Income & Taxes","Enter gross income, estimate regional taxes, understand gross vs net, and connect take-home income to your budget.","#2F80ED"),
+        ("◔","Budgeting","Plan every monthly dollar across expenses, savings, investing, retirement and reserves.","#8A63F6"),
+        ("↓","Debt & Loans","Track personal loans, mortgages, credit and payoff obligations without mixing them into company books.","#F25563"),
+        ("◎","Goals","Prepare for a home, emergency fund, large purchase, education or any other financial target.","#F4A11A"),
+        ("♜","Retirement","Build retirement targets that will eventually connect directly to Sullivan Wealth.","#22C879"),
+        ("◆","Wealth","Turn budget surplus into investing, real-estate, retirement or business-building strategies.","#24B6C9"),
+    ],3)
+
+def v212_personal_planning():
+    st.subheader("Debt, Goals & Retirement")
+    st.caption("The personal planning layer that feeds Sullivan Wealth.")
+
+    if current_company() is not None:
+        st.warning("Switch to your **Personal workspace** before storing personal debt or retirement information.")
+
+    finance_tabs=st.tabs(["Debt & Loans","Goals","Retirement"])
+    with finance_tabs[0]:
+        st.info(
+            "Personal debt uses Sullivan's existing Finance engine. "
+            "Open **Wealth → Wealth Plan** to tell Sullivan your highest debt rate, "
+            "or use a Personal workspace Finance record for detailed loan tracking."
+        )
+        v20_render_finance()
+
+    with finance_tabs[1]:
+        v212_card_grid([
+            ("⌂","Home / Property","Build a down-payment target and later connect it to the Real Estate Wealth module.","#2F80ED"),
+            ("▣","Emergency Reserve","Protect a minimum cash reserve before Sullivan recommends deploying more money.","#22C879"),
+            ("✦","Large Purchase","Plan vehicles, education, travel or another major goal without losing sight of long-term wealth.","#F4A11A"),
+        ],3)
+        st.caption("Dedicated saved Personal Goals are planned for the next roadmap layer.")
+
+    with finance_tabs[2]:
+        v212_card_grid([
+            ("◉","Retirement Target","Choose the lifestyle and retirement age you are building toward.","#8A63F6"),
+            ("↗","Contribution Plan","Connect monthly budget surplus to retirement contributions.","#2F80ED"),
+            ("◎","Region-aware accounts","Sullivan will prioritize the retirement/tax-advantaged accounts available in your tax region.","#22C879"),
+        ],3)
+        st.caption("Retirement-account tracking expands inside Wealth so it can remain connected to the full portfolio.")
+
+def v212_business_overview():
+    st.subheader("Business")
+    st.caption("Accounting, cash flow, payroll, taxes, financing and business intelligence — grouped without replacing Home.")
+
+    if current_company() is None:
+        st.warning(
+            "You are currently in **Personal**. Switch to a company workspace before entering company accounting records."
+        )
+    else:
+        c=current_company()
+        st.success(f"Company workspace active · **{c.get('company_name','Company')}**")
+
+    m=v13_home_metrics()
+    a,b,c,d=st.columns(4)
+    a.metric("Money in bank",f"${float(m.get('bank',0) or 0):,.2f}")
+    b.metric("Money earned",f"${float(m.get('revenue',0) or 0):,.2f}")
+    c.metric("Profit",f"${float(m.get('profit',0) or 0):,.2f}")
+    d.metric("Customers owe",f"${float(m.get('ar',0) or 0):,.2f}")
+
+    v212_card_grid([
+        ("⇩","Accounting","Import transactions, resolve questions, manage the ledger, journals, periods and Smart Close.","#2F80ED"),
+        ("↗","Money In","Customers, estimates, invoices, credit notes, recurring billing and statements.","#22C879"),
+        ("↓","Money Out","Vendors, purchase orders, bills and business documents.","#F25563"),
+        ("▤","Banking","Bank activity and reconciliation in one place.","#24B6C9"),
+        ("%","Taxes","Tax Center and the active workspace tax region.","#F4A11A"),
+        ("◈","Insights","Business Health, trends, priorities and Sullivan Business Advisor.","#8A63F6"),
+        ("$","Finance","Debt, financing, assets and equity.","#2F80ED"),
+        ("●●","Team","Company members, roles, invitations and seats.","#24B6C9"),
+        ("▥","Reports","Financial statements and money owed / bills owed.","#22C879"),
+    ],3)
+
+def v212_wealth_snapshot():
+    surplus,budget=v211_budget_surplus()
+    plans=v211_wealth_plans()
+    country,region=v204_region()
+
+    reserve_gap=0.0
+    goal="Not set"
+    risk="Not set"
+    if not plans.empty:
+        p=plans.iloc[0]
+        goal=str(p.get("goal") or "Not set")
+        risk=str(p.get("risk_style") or "Not set")
+        reserve_gap=max(0.0,float(p.get("reserve_target",0) or 0)-float(p.get("reserve_current",0) or 0))
+
+    return {
+        "monthly_surplus":float(surplus or 0),
+        "budget_name":str(budget["plan_name"]) if budget is not None else "",
+        "goal":goal,
+        "risk":risk,
+        "reserve_gap":reserve_gap,
+        "country":country,
+        "region":region,
+        "mode":"Business" if current_company() is not None else "Personal",
+    }
+
+def v212_wealth_intro(title, subtitle, icon, accent):
+    theme=v212_theme()
+    st.markdown(
+        f"""
+        <div style="
+            background:{theme['card']};border:1px solid {theme['border']};
+            border-radius:26px;padding:22px 24px;margin:2px 0 16px;
+            box-shadow:0 14px 34px rgba(0,0,0,.065);
+        ">
+          <div style="display:flex;gap:16px;align-items:center;">
+            <div style="width:58px;height:58px;border-radius:18px;background:{accent}1A;color:{accent};
+                        display:flex;align-items:center;justify-content:center;font-size:1.6rem;font-weight:900;">
+              {icon}
+            </div>
+            <div>
+              <div style="color:{theme['text']};font-size:1.35rem;font-weight:950;">{html.escape(title)}</div>
+              <div style="color:{theme['muted']};font-size:.84rem;line-height:1.5;margin-top:4px;">
+                {html.escape(subtitle)}
+              </div>
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+def v212_context_for_ai(category):
+    s=v212_wealth_snapshot()
+    base=v204_budget_income_baseline()
+    finance=v20_finance_summary()
+    return {
+        "category":category,
+        "workspace_mode":s["mode"],
+        "region":{"country":s["country"],"region":s["region"]},
+        "monthly_estimated_net_income":float(base.get("monthly_net",0) or 0),
+        "monthly_budget_surplus":s["monthly_surplus"],
+        "wealth_goal":s["goal"],
+        "risk_style":s["risk"],
+        "reserve_gap":s["reserve_gap"],
+        "tracked_debt":float(finance.get("total_debt",0) or 0),
+        "monthly_debt_service":float(finance.get("monthly_debt_service",0) or 0),
+    }
+
+def v212_run_wealth_ai(category, question, use_live_search=True):
+    if not str(question or "").strip():
+        raise ValueError("Ask Sullivan a question first.")
+    if not key():
+        raise ValueError("Sullivan AI is not configured on this server.")
+
+    # Preserve the established Sullivan rule: only Help AI is free.
+    credit_cost=AI_CREDIT_COSTS["wealth_research"]
+    company_id=v18_require_ai_credits("wealth_research",credit_cost)
+
+    context=v212_context_for_ai(category)
+    instructions=f"""
+You are Sullivan Wealth — {category}, a specialized financial education and planning assistant.
+
+Use the supplied Sullivan financial context when relevant.
+Clearly separate:
+- Facts from the user's Sullivan records
+- Current facts found through web research
+- Assumptions / estimates
+- Educational suggestions
+
+Never describe a stock, ETF, property, business, or investment as guaranteed or truly safe.
+Use phrases such as diversified, lower-volatility, lower-risk relative to alternatives, or historically less volatile where appropriate.
+Do not promise returns or claim one universally best strategy.
+For tax, legal, lending, securities, or retirement-account decisions, explain the planning logic and uncertainty.
+
+For STOCKS / ETFs:
+Teach before recommending categories. Explain diversification, index funds, S&P 500 exposure, fees,
+time horizon, volatility, concentration and regional tax/account considerations. Relate contribution
+amounts to the user's actual monthly surplus. Specific securities can be discussed as examples, but
+explain why they fit and the risks.
+
+For REAL ESTATE:
+You may research current areas, pricing context, mortgage-rate context and property-market information.
+When estimating a mortgage, state the assumed price, down payment, rate, amortization and excluded costs.
+Never invent a live listing. If a listing is referenced, it must come from current web research.
+
+For BUILD A BUSINESS:
+Match business models to available monthly/starting capital, time, risk and current region. Separate
+startup cost estimates from facts and explain operating risks.
+
+For RETIREMENT:
+Use the user's country/region to discuss relevant retirement and tax-advantaged account categories.
+Do not claim a tax treatment is certain without current verification.
+
+For OTHER OPPORTUNITIES:
+Compare options such as cash reserves, debt reduction, bonds/fixed income, REITs, skills/education,
+business acquisition and other legitimate wealth-building routes.
+
+Keep the answer polished and practical. Do not use LaTeX.
+"""
+    user_prompt=(
+        "SULLIVAN CONTEXT:\n"+json.dumps(context,default=str)+
+        "\n\nUSER QUESTION:\n"+str(question).strip()
+    )
+
+    client=OpenAI(api_key=key())
+    kwargs={
+        "model":MODEL,
+        "instructions":instructions,
+        "input":user_prompt,
+        "max_output_tokens":1500,
+    }
+
+    if use_live_search:
+        country_code="CA" if context["region"]["country"]=="Canada" else "US"
+        kwargs["tools"]=[{
+            "type":"web_search",
+            "search_context_size":"medium",
+            "user_location":{
+                "type":"approximate",
+                "country":country_code,
+                "region":context["region"]["region"],
+            }
+        }]
+
+    response=client.responses.create(**kwargs)
+    answer=(getattr(response,"output_text","") or "").strip()
+    if not answer:
+        raise ValueError("Sullivan could not generate the wealth analysis.")
+
+    # Only consume credits after a successful AI response.
+    v18_consume_ai_credits(
+        company_id,"wealth_research",credit_cost,
+        f"{category} | {str(question)[:160]}"
+    )
+    return answer
+
+def v212_ask_ai_box(category, placeholder, live=True):
+    theme=v212_theme()
+    st.markdown(
+        f"""
+        <div style="background:{theme['card']};border:1px solid {theme['border']};border-radius:22px;
+                    padding:16px 18px;margin-top:14px;">
+          <div style="color:{theme['text']};font-weight:900;font-size:1rem;">✨ Ask Sullivan · {html.escape(category)}</div>
+          <div style="color:{theme['muted']};font-size:.78rem;margin-top:3px;">
+            Personalized to your Sullivan financial data and tax region.
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+    q=st.text_area(
+        "Your question",
+        placeholder=placeholder,
+        key=f"v212_ai_q_{re.sub(r'[^A-Za-z0-9]+','_',category)}",
+        label_visibility="collapsed"
+    )
+    if st.button(
+        f"Ask Sullivan about {category}",
+        type="primary",
+        width="stretch",
+        key=f"v212_ai_btn_{re.sub(r'[^A-Za-z0-9]+','_',category)}"
+    ):
+        try:
+            with st.spinner("Sullivan is reviewing your finances and researching…"):
+                ans=v212_run_wealth_ai(category,q,live)
+            st.session_state[f"v212_ai_ans_{category}"]=ans
+        except Exception as e:
+            st.error(str(e))
+
+    if st.session_state.get(f"v212_ai_ans_{category}"):
+        st.markdown(st.session_state[f"v212_ai_ans_{category}"])
+
+def v212_render_wealth_overview():
+    s=v212_wealth_snapshot()
+    v212_wealth_intro(
+        "Wealth",
+        "Learn the major ways people build wealth, compare them against your actual finances, then let Sullivan help you build a roadmap.",
+        "◆","#8A63F6"
+    )
+
+    a,b,c,d=st.columns(4)
+    a.metric("Available after budget",f"${s['monthly_surplus']:,.2f}/mo")
+    b.metric("Primary goal",s["goal"])
+    c.metric("Risk style",s["risk"])
+    d.metric("Region",s["region"])
+
+    st.markdown("### Explore a wealth path")
+    v212_card_grid([
+        ("↗","Stocks & ETFs","Learn the market, diversified index investing, S&P 500 exposure, risk, compounding and contribution strategies.","#2F80ED"),
+        ("⌂","Real Estate","Learn property investing, down payments, mortgages, rental math, condos, duplexes and market research.","#22C879"),
+        ("▣","Build a Business","Compare business models against your available capital, skills, time and risk tolerance.","#F4A11A"),
+        ("♜","Retirement","Connect long-term investing to retirement goals and region-specific tax-advantaged accounts.","#8A63F6"),
+        ("◎","Other Opportunities","Debt payoff, fixed income, REITs, education/skills, business acquisition and other legitimate paths.","#24B6C9"),
+        ("◉","Portfolio","A future consolidated view of what you own, what it is worth, and how every wealth strategy fits together.","#E36BAE"),
+    ],3)
+
+    st.info(
+        "Sullivan's goal is not to push everybody into the same investment. "
+        "It uses your income, budget surplus, debt, reserves, region, goals and risk tolerance to explain what may fit and why."
+    )
+
+def v212_render_stocks():
+    s=v212_wealth_snapshot()
+    v212_wealth_intro(
+        "Stocks & ETFs",
+        "Learn how public markets work and build a contribution plan around the money your Sullivan Budget says is actually available.",
+        "↗","#2F80ED"
+    )
+
+    monthly=max(0.0,s["monthly_surplus"])
+    a,b,c=st.columns(3)
+    a.metric("Available after budget",f"${monthly:,.2f}/mo")
+    b.metric("Risk style",s["risk"])
+    c.metric("Planning region",f"{s['region']}, {s['country']}")
+
+    if monthly <= 0:
+        st.warning("Sullivan does not currently see positive budget surplus. Build the financial foundation before increasing market contributions.")
+    elif monthly < 100:
+        st.info("A small recurring contribution can still build the habit. Low fees and broad diversification matter especially when contribution amounts are smaller.")
+    elif monthly < 500:
+        st.success("Your current surplus can support a consistent recurring investing plan while keeping the portfolio simple and diversified.")
+    else:
+        st.success("Your current surplus gives you room to build a diversified core while still reserving money for retirement, property or other goals.")
+
+    st.markdown("### Learn the market")
+    v212_card_grid([
+        ("◎","Stock Market 101","What a share is, why prices move, market capitalization, exchanges and how investors make or lose money.","#2F80ED"),
+        ("▦","Index Funds & ETFs","How one fund can hold hundreds or thousands of companies instead of betting on one stock.","#22C879"),
+        ("500","S&P 500","What the S&P 500 represents, why it is commonly used as a U.S. market benchmark, and what risks remain.","#8A63F6"),
+        ("◔","Risk & Volatility","Why 'safe stock' is misleading and how diversification, time horizon and asset mix affect risk.","#F25563"),
+        ("↗","Compounding","How consistent contributions and reinvested growth can accumulate over long periods.","#F4A11A"),
+        ("%","Fees & Taxes","Expense ratios, trading costs and why account/tax treatment depends on your region.","#24B6C9"),
+    ],3)
+
+    st.caption(
+        "Sullivan uses **lower-risk / diversified** rather than calling market investments 'safe' because stocks and ETFs can lose value."
+    )
+    v212_ask_ai_box(
+        "Stocks & ETFs",
+        "Example: I have $600/month left after my budget. Teach me a diversified way to start investing and explain how much risk I am taking.",
+        live=True
+    )
+
+def v212_mortgage_payment(principal, annual_rate, years):
+    p=max(0.0,float(principal or 0))
+    n=max(1,int(years*12))
+    r=max(0.0,float(annual_rate or 0))/100/12
+    if r==0:
+        return p/n
+    return p*r/(1-(1+r)**(-n))
+
+def v212_render_real_estate():
+    s=v212_wealth_snapshot()
+    v212_wealth_intro(
+        "Real Estate",
+        "Learn property investing, test affordability, model a mortgage, and ask Sullivan to research areas that fit your region and finances.",
+        "⌂","#22C879"
+    )
+
+    a,b,c=st.columns(3)
+    a.metric("Monthly budget surplus",f"${s['monthly_surplus']:,.2f}")
+    b.metric("Region",f"{s['region']}, {s['country']}")
+    c.metric("Wealth goal",s["goal"])
+
+    st.markdown("### Learn real estate")
+    v212_card_grid([
+        ("▣","Condos","Purchase price, condo fees, reserve funds, assessments, rent potential and financing.","#2F80ED"),
+        ("⌂","Duplex / Multifamily","How multiple rents, vacancies and operating expenses affect property cash flow.","#22C879"),
+        ("$","Rental Property Math","Mortgage, taxes, insurance, maintenance, vacancy, rent, NOI and cash flow.","#F4A11A"),
+        ("%","Cap Rate & Cash-on-Cash","Two common ways investors compare property economics — and where each metric can mislead.","#8A63F6"),
+        ("↗","Value-Add","Renovations, rent improvements and operational improvements that may increase property economics.","#24B6C9"),
+        ("◎","REITs","Real-estate exposure through publicly traded or private real-estate investment structures without directly owning a building.","#E36BAE"),
+    ],3)
+
+    st.markdown("### Mortgage sandbox")
+    r1,r2,r3,r4=st.columns(4)
+    price=r1.number_input("Property price",min_value=0.0,value=250000.0,step=5000.0,key="v212_re_price")
+    down_pct=r2.number_input("Down payment (%)",min_value=0.0,max_value=100.0,value=20.0,step=1.0,key="v212_re_down")
+    rate=r3.number_input("Mortgage rate (%)",min_value=0.0,max_value=30.0,value=5.0,step=.1,key="v212_re_rate")
+    years=r4.selectbox("Amortization", [15,20,25,30], index=2, key="v212_re_years")
+
+    down=price*down_pct/100
+    principal=max(0.0,price-down)
+    payment=v212_mortgage_payment(principal,rate,years)
+
+    x1,x2,x3=st.columns(3)
+    x1.metric("Down payment",f"${down:,.2f}")
+    x2.metric("Mortgage principal",f"${principal:,.2f}")
+    x3.metric("Est. principal + interest",f"${payment:,.2f}/mo")
+    st.caption(
+        "Planning estimate only. This does not include mortgage insurance, property taxes, condo fees, insurance, utilities, closing costs or lender-specific qualification rules."
+    )
+
+    v212_ask_ai_box(
+        "Real Estate",
+        f"Example: Find lower-priced areas worth researching for condos around {s['region']}, {s['country']}. "
+        "Explain the current price context you find, then show mortgage examples and what costs I should still verify.",
+        live=True
+    )
+
+def v212_render_business_building():
+    s=v212_wealth_snapshot()
+    v212_wealth_intro(
+        "Build a Business",
+        "Use your real available capital to explore business models instead of starting with unrealistic revenue promises.",
+        "▣","#F4A11A"
+    )
+
+    a,b,c=st.columns(3)
+    a.metric("Available monthly",f"${s['monthly_surplus']:,.2f}")
+    a.caption("From your connected Sullivan Budget")
+    b.metric("Region",s["region"])
+    c.metric("Goal",s["goal"])
+
+    st.markdown("### Business-building paths")
+    v212_card_grid([
+        ("⚙","Service Business","Lower startup capital, skills-driven businesses such as trades, cleaning, landscaping, consulting or local services.","#2F80ED"),
+        ("◫","Online / E-commerce","Digital storefronts, product businesses and the realities of acquisition costs, margins and inventory.","#8A63F6"),
+        ("AI","Software / SaaS","Recurring-revenue software, product-market fit, development cost and customer acquisition.","#24B6C9"),
+        ("⌂","Local / Physical Business","Retail, restaurants, laundromats and other location-dependent businesses with higher fixed costs.","#22C879"),
+        ("◆","Acquire a Business","Buying existing cash flow instead of building from zero — including financing and due diligence.","#F4A11A"),
+        ("▦","Franchise","Brand/system support in exchange for upfront fees, royalties and operating restrictions.","#E36BAE"),
+    ],3)
+
+    v212_ask_ai_box(
+        "Build a Business",
+        "Example: I can invest $15,000 upfront and about $1,000/month after that. What realistic business models fit my finances and region?",
+        live=True
+    )
+
+def v212_render_retirement():
+    s=v212_wealth_snapshot()
+    v212_wealth_intro(
+        "Retirement",
+        "Connect today's budget surplus to a long-term retirement plan while accounting for region-specific retirement and tax rules.",
+        "♜","#8A63F6"
+    )
+
+    st.markdown("### Retirement building blocks")
+    v212_card_grid([
+        ("◎","Target","Choose a retirement age, lifestyle and desired future spending level.","#2F80ED"),
+        ("↗","Contributions","Turn a monthly amount into a repeatable long-term savings habit.","#22C879"),
+        ("%","Tax-Advantaged Accounts","Learn which retirement/investment accounts exist in your region and the trade-offs of each.","#8A63F6"),
+        ("◔","Investment Mix","How time horizon and risk tolerance can change the balance between equities, fixed income and cash.","#F4A11A"),
+        ("$","Withdrawal Planning","Why retirement is also about how money may be withdrawn and taxed later.","#24B6C9"),
+        ("▥","Inflation","Why future purchasing power matters when estimating how much retirement income you may need.","#F25563"),
+    ],3)
+
+    v212_ask_ai_box(
+        "Retirement",
+        f"Example: I live in {s['region']}, {s['country']} and have ${max(0,s['monthly_surplus']):,.0f}/month available. "
+        "Teach me the retirement-account options I should research and how to think about allocating contributions.",
+        live=True
+    )
+
+def v212_render_other_opportunities():
+    v212_wealth_intro(
+        "Other Wealth Opportunities",
+        "Stocks and property are not the only ways to improve a financial position. Sullivan compares alternatives instead of forcing one path.",
+        "◎","#24B6C9"
+    )
+    v212_card_grid([
+        ("↓","High-Interest Debt","Paying down expensive debt can create a guaranteed reduction in interest expense, unlike market returns.","#F25563"),
+        ("▣","Cash / Reserve","Liquidity can protect you from selling investments or borrowing during emergencies.","#22C879"),
+        ("▥","Fixed Income","Bonds and other fixed-income assets can play a different risk/income role than equities.","#2F80ED"),
+        ("⌂","REITs","A way to get real-estate exposure without directly managing a property.","#8A63F6"),
+        ("⚙","Skills & Education","Increasing earning power can sometimes have a larger financial effect than optimizing a small portfolio.","#F4A11A"),
+        ("◆","Business Acquisition","Buying an existing operation can be another route to cash flow, but requires careful due diligence.","#E36BAE"),
+    ],3)
+    v212_ask_ai_box(
+        "Other Wealth Opportunities",
+        "Compare the major wealth-building options that fit my current Sullivan finances. Tell me what I should learn about first and why.",
+        live=True
+    )
+
+def v212_render_portfolio():
+    v212_wealth_intro(
+        "Portfolio",
+        "The future consolidated view of investments, properties, businesses, cash, retirement assets and debt.",
+        "◉","#E36BAE"
+    )
+    plans=v211_wealth_plans()
+    finance=v20_finance_summary()
+    assets=read("SELECT * FROM business_assets WHERE status!='Disposed'")
+
+    c1,c2,c3=st.columns(3)
+    c1.metric("Tracked debt",f"${float(finance.get('total_debt',0) or 0):,.2f}")
+    c2.metric("Saved Wealth Plans",f"{len(plans):,}")
+    c3.metric("Tracked assets",f"{len(assets):,}")
+
+    st.info(
+        "This Portfolio page is intentionally being built as the **single future holdings view**. "
+        "Stocks/ETFs, retirement accounts, real estate and business ownership will eventually appear here together "
+        "instead of becoming separate disconnected trackers."
+    )
+
+def v212_render_ai_home():
+    v212_wealth_intro(
+        "Sullivan AI",
+        "One AI system with specialized financial roles. Customer Service remains free; personalized financial analysis uses your normal Sullivan AI Credits.",
+        "AI","#2F80ED"
+    )
+    v212_card_grid([
+        ("◈","Business Advisor","Personalized analysis using business score, accounting records, debt, assets, AR/AP and trends.","#8A63F6"),
+        ("↗","Stocks & ETFs AI","Market education and personalized investing questions based on your financial context.","#2F80ED"),
+        ("⌂","Real Estate AI","Current market research, mortgage scenarios and property-investing education.","#22C879"),
+        ("▣","Business Building AI","Business-model research matched to available capital, region and goals.","#F4A11A"),
+        ("♜","Retirement AI","Region-aware retirement education and contribution planning.","#24B6C9"),
+        ("?","Free Help AI","How-to support for using Sullivan. This remains the one AI area that does not consume AI Credits.","#E36BAE"),
+    ],3)
+    st.info("Open **Wealth** to use the specialized Wealth AIs inside the category you are researching.")
+
+main_sections=st.tabs(["Home","Personal","Business","Wealth","Sullivan AI","Settings"])
+
+# HOME — intentionally preserved. The full existing dashboard is rendered later
+# through `with home_tabs[0]:`.
 with main_sections[0]:
     home_tabs=[st.container()]
+
+# PERSONAL
+with main_sections[1]:
+    personal_tabs=st.tabs(["Overview","Income & Taxes","Budgeting","Debt, Goals & Retirement"])
+    with personal_tabs[0]:
+        v212_personal_overview()
+    with personal_tabs[1]:
+        v204_render_income_payroll()
+    with personal_tabs[2]:
+        v21_render_budgeting()
+    with personal_tabs[3]:
+        v212_personal_planning()
+
+# BUSINESS
 with main_sections[2]:
-    v204_render_income_payroll()
+    business_tabs=st.tabs([
+        "Overview","Accounting","Money In","Money Out","Banking",
+        "Taxes","Reports","Insights","Finance","Team"
+    ])
+    with business_tabs[0]:
+        v212_business_overview()
+    with business_tabs[1]:
+        accountant_tabs=st.tabs([
+            "Import & Analyze","Question Queue","Chart of Accounts","Opening Balances",
+            "Saved Ledger","General Ledger","Manual Journals","Corrections / Reversals",
+            "Accounting Periods","Smart Close","Integrity Center","Audit Trail","Accountant Export"
+        ])
+    with business_tabs[2]:
+        sales_tabs=st.tabs(["Customers","Estimates","Invoices","Credit Notes","Recurring","Statements"])
+    with business_tabs[3]:
+        expense_tabs=st.tabs(["Vendors","Purchase Orders","Bills","Documents"])
+    with business_tabs[4]:
+        banking_tabs=st.tabs(["Bank Activity","Reconciliation"])
+    with business_tabs[5]:
+        tax_tabs=st.tabs(["Tax Center"])
+    with business_tabs[6]:
+        report_tabs=st.tabs(["Financial Reports","Money Owed / Bills Owed"])
+    with business_tabs[7]:
+        v202_render_business_intelligence()
+    with business_tabs[8]:
+        finance_sections=st.tabs(["Debt & Financing","Assets & Equity"])
+        with finance_sections[0]:
+            v20_render_finance()
+        with finance_sections[1]:
+            v201_render_assets_equity()
 
+# WEALTH
 with main_sections[3]:
-    v21_render_budgeting()
+    wealth_tabs=st.tabs([
+        "Overview","Stocks & ETFs","Real Estate","Build a Business",
+        "Retirement","Other Opportunities","Portfolio","Wealth Plan"
+    ])
+    with wealth_tabs[0]:
+        v212_render_wealth_overview()
+    with wealth_tabs[1]:
+        v212_render_stocks()
+    with wealth_tabs[2]:
+        v212_render_real_estate()
+    with wealth_tabs[3]:
+        v212_render_business_building()
+    with wealth_tabs[4]:
+        v212_render_retirement()
+    with wealth_tabs[5]:
+        v212_render_other_opportunities()
+    with wealth_tabs[6]:
+        v212_render_portfolio()
+    with wealth_tabs[7]:
+        v211_render_wealth()
 
+# SULLIVAN AI
 with main_sections[4]:
-    v211_render_wealth()
+    ai_tabs=st.tabs(["AI Home","Plan & Usage","Free Help"])
+    with ai_tabs[0]:
+        v212_render_ai_home()
+    with ai_tabs[2]:
+        st.subheader("Free Sullivan Help")
+        v196_render_support_ai()
 
-with main_sections[5]:
-    sales_tabs=st.tabs(["Customers","Estimates","Invoices","Credit Notes","Recurring","Statements"])
-with main_sections[6]:
-    expense_tabs=st.tabs(["Vendors","Purchase Orders","Bills","Documents"])
-with main_sections[7]:
-    banking_tabs=st.tabs(["Bank Activity","Reconciliation"])
-with main_sections[8]:
-    tax_tabs=st.tabs(["Tax Center"])
-with main_sections[9]:
-    report_tabs=st.tabs(["Financial Reports","Money Owed / Bills Owed"])
-with main_sections[10]:
-    v202_render_business_intelligence()
-
-with main_sections[11]:
-    finance_sections=st.tabs(["Debt & Financing","Assets & Equity"])
-    with finance_sections[0]:
-        v20_render_finance()
-    with finance_sections[1]:
-        v201_render_assets_equity()
-
-with main_sections[12]:
+with business_tabs[9]:
     st.subheader("Team")
 
     if not v171_is_signed_in():
@@ -10042,7 +10669,7 @@ with main_sections[12]:
             else:
                 st.info("Only an Owner or Manager can invite employees.")
 
-with main_sections[13]:
+with ai_tabs[1]:
     st.subheader("Plan & AI")
     st.caption("Manage your Sullivan membership, team seats, billing status, and AI usage.")
 
@@ -10290,14 +10917,7 @@ with main_sections[13]:
                     else:
                         st.dataframe(usage,use_container_width=True,hide_index=True)
 
-with main_sections[1]:
-    accountant_tabs=st.tabs([
-        "Import & Analyze","Question Queue","Chart of Accounts","Opening Balances",
-        "Saved Ledger","General Ledger","Manual Journals","Corrections / Reversals",
-        "Accounting Periods","Smart Close","Integrity Center","Audit Trail","Accountant Export"
-    ])
-
-with main_sections[14]:
+with main_sections[5]:
     st.subheader("Settings")
     st.caption("Manage your Sullivan preferences, workspaces, account details, and support options.")
 
@@ -10536,9 +11156,9 @@ with home_tabs[0]:
         "To change it, go to **Settings → Preferences → Tax Region**."
     )
     st.info(
-        "💰 **Build a budget:** Open **Budgeting** to turn your monthly net income into expenses, "
+        "💰 **Build a budget:** Open **Personal → Budgeting** to turn your monthly net income into expenses, "
         "savings, investing, retirement, or business-growth allocations. "
-        "If you only know your gross income, use **Income & Payroll** first to estimate net."
+        "If you only know your gross income, use **Personal → Income & Taxes** first to estimate net."
     )
 
     kpis=[
