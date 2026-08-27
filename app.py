@@ -16,7 +16,60 @@ import math
 import html
 import time
 
-st.set_page_config(page_title="Sullivan V22.0.3", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V22.0.4", page_icon="S", layout="wide")
+
+st.markdown(r"""
+<style>
+/* Sullivan V22.0.4 — theme-aware input polish */
+
+/* LIGHT MODE */
+@media (prefers-color-scheme: light) {
+  div[data-baseweb="select"] svg,
+  div[data-baseweb="select"] [role="button"] svg {
+    color: #111111 !important;
+    fill: #111111 !important;
+  }
+
+  div[data-testid="stNumberInput"] button,
+  div[data-testid="stNumberInput"] button svg {
+    color: #111111 !important;
+    fill: #111111 !important;
+  }
+
+  div[data-testid="InputInstructions"],
+  div[data-testid="InputInstructions"] *,
+  [data-testid="stTextInput"] small,
+  [data-testid="stNumberInput"] small {
+    color: #111111 !important;
+    opacity: .72 !important;
+  }
+}
+
+/* DARK MODE */
+@media (prefers-color-scheme: dark) {
+  div[data-baseweb="select"] svg,
+  div[data-baseweb="select"] [role="button"] svg {
+    color: #ffffff !important;
+    fill: #ffffff !important;
+  }
+
+  div[data-testid="stNumberInput"] button,
+  div[data-testid="stNumberInput"] button svg {
+    color: #ffffff !important;
+    fill: #ffffff !important;
+  }
+
+  div[data-testid="InputInstructions"],
+  div[data-testid="InputInstructions"] *,
+  [data-testid="stTextInput"] small,
+  [data-testid="stNumberInput"] small {
+    color: #ffffff !important;
+    opacity: .78 !important;
+  }
+}
+</style>
+""", unsafe_allow_html=True)
+
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -4016,7 +4069,7 @@ def supabase_headers():
 # cannot overwrite the production Sullivan backup just because it uses the same
 # Supabase secrets.
 
-V22_PERSISTENCE_VERSION = "22.0.3"
+V22_PERSISTENCE_VERSION = "22.0.4"
 V22_DEFAULT_BUCKET = "sullivan-persistence"
 
 # Legacy whole-file object retained only as a restore fallback for any earlier V22 backup.
@@ -5115,7 +5168,7 @@ v17_init_auth_tables()
 
 # V22.0.2 automatic cloud safety backup.
 v22_autosave_fragment()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.0.3</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.0.4</span></div>",unsafe_allow_html=True)
 
 
 
