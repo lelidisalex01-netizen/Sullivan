@@ -16,7 +16,7 @@ import math
 import html
 import time
 
-st.set_page_config(page_title="Sullivan V22.0.2", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V22.0.3", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -367,18 +367,17 @@ def write(fn):
     finally:
         c.close()
 
-    # V22: every successful Sullivan mutation gets a durable Supabase snapshot.
-    # Persistence errors are isolated from the accounting transaction itself.
+    # V22.0.3 PERFORMANCE:
+    # Keep normal bookkeeping actions fast. A successful write only marks
+    # cloud persistence dirty; the 2-minute autosave performs the verified
+    # Supabase snapshot later and combines many quick changes into one backup.
     if committed:
         try:
-            backup_fn=globals().get("v22_cloud_backup")
-            if callable(backup_fn):
-                backup_fn(reason="database_write")
-        except Exception as e:
-            try:
-                print(f"V22 persistence warning after write: {type(e).__name__}: {e}")
-            except Exception:
-                pass
+            dirty_fn=globals().get("v2203_mark_persistence_dirty")
+            if callable(dirty_fn):
+                dirty_fn("database_write")
+        except Exception:
+            pass
 
     return result
 
@@ -4017,7 +4016,7 @@ def supabase_headers():
 # cannot overwrite the production Sullivan backup just because it uses the same
 # Supabase secrets.
 
-V22_PERSISTENCE_VERSION = "22.0.2"
+V22_PERSISTENCE_VERSION = "22.0.3"
 V22_DEFAULT_BUCKET = "sullivan-persistence"
 
 # Legacy whole-file object retained only as a restore fallback for any earlier V22 backup.
@@ -4692,16 +4691,46 @@ def v22_persistence_status():
     return dict(_V22_PERSISTENCE_STATUS)
 
 # ------------------------------------------------------------
-# V22.0.2 — AUTO-SAVE SAFETY HEARTBEAT
+# V22.0.3 — FAST WRITES + COALESCED CLOUD AUTOSAVE
 # ------------------------------------------------------------
-# Sullivan already backs up after every successful database write.
-# This adds a second safety backup every 2 minutes while the app is open.
+# SQLite commits return immediately. Cloud backup only runs when data changed,
+# at most once every two minutes while Sullivan is open.
 V22_AUTOSAVE_SECONDS = 120
 V22_AUTOSAVE_MARKER = APP_DIR / ".sullivan_v22_autosave"
+V2203_DIRTY_MARKER = APP_DIR / ".sullivan_v2203_dirty"
+
+
+def v2203_mark_persistence_dirty(reason="change"):
+    try:
+        V2203_DIRTY_MARKER.write_text(
+            json.dumps({
+                "reason": str(reason),
+                "changed_at_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            }),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def v2203_persistence_dirty():
+    try:
+        return V2203_DIRTY_MARKER.exists()
+    except Exception:
+        return True
+
+
+def v2203_clear_persistence_dirty():
+    try:
+        V2203_DIRTY_MARKER.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def v22_autosave_due():
     if not v22_cloud_persistence_enabled():
+        return False
+    if not v2203_persistence_dirty():
         return False
     try:
         if not V22_AUTOSAVE_MARKER.exists():
@@ -4716,7 +4745,10 @@ def v22_claim_autosave_slot():
         if not v22_autosave_due():
             return False
         tmp = APP_DIR / f".sullivan_v22_autosave_{os.getpid()}_{int(time.time()*1000)}"
-        tmp.write_text(datetime.utcnow().isoformat(timespec="seconds") + "Z", encoding="utf-8")
+        tmp.write_text(
+            datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            encoding="utf-8",
+        )
         os.replace(tmp, V22_AUTOSAVE_MARKER)
         return True
     except Exception:
@@ -4726,12 +4758,21 @@ def v22_claim_autosave_slot():
 def v22_run_autosave():
     if not v22_claim_autosave_slot():
         return
-    result = v22_cloud_backup(reason="automatic_2_minute_safety_backup")
-    if not result.get("ok"):
+    result = v22_cloud_backup(reason="automatic_coalesced_2_minute_backup")
+    if result.get("ok"):
+        v2203_clear_persistence_dirty()
+    else:
         try:
             V22_AUTOSAVE_MARKER.unlink(missing_ok=True)
         except Exception:
             pass
+
+
+def v2203_force_cloud_backup(reason="manual_or_critical"):
+    result = v22_cloud_backup(reason=reason)
+    if result.get("ok"):
+        v2203_clear_persistence_dirty()
+    return result
 
 
 try:
@@ -5074,7 +5115,7 @@ v17_init_auth_tables()
 
 # V22.0.2 automatic cloud safety backup.
 v22_autosave_fragment()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.0.2</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.0.3</span></div>",unsafe_allow_html=True)
 
 
 
@@ -11950,22 +11991,26 @@ with main_sections[5]:
                     )
 
                 st.caption(
-                    "Sullivan protects successful database changes immediately and also runs a two-minute "
-                    "cloud safety backup while the app is open. The complete database, workspace records, "
-                    "documents, and exports are stored in private Supabase Storage using small verified chunks."
+                    "Sullivan saves normal accounting changes immediately for fast response, then automatically "
+                    "syncs changed data to private Supabase Storage every two minutes while the app is open. "
+                    "Multiple quick actions are combined into one verified cloud backup."
                 )
 
                 if _v22ps.get("last_backup"):
                     st.write(f"**Last cloud backup:** {_v22ps['last_backup']}")
-                st.write("**Automatic protection:** Immediate after saved changes + safety backup every 2 minutes")
+                st.write("**Automatic protection:** Instant local save + changed data synced to cloud every 2 minutes")
                 if _v22ps.get("last_restore"):
                     st.write(f"**Last cloud restore:** {_v22ps['last_restore']}")
+                st.write(
+                    "**Cloud sync:** "
+                    + ("Changes pending · automatic sync scheduled" if v2203_persistence_dirty() else "Up to date")
+                )
                 if _v22ps.get("last_error"):
                     st.error(f"Persistence diagnostic: {_v22ps['last_error']}")
 
                 if st.button("Back up Sullivan now", key="v22_backup_now", width="content"):
                     with st.spinner("Creating a complete Sullivan cloud backup…"):
-                        _v22backup = v22_cloud_backup(reason="manual_settings")
+                        _v22backup = v2203_force_cloud_backup(reason="manual_settings")
                     if _v22backup.get("ok"):
                         st.success("Complete Sullivan backup saved to Supabase.")
                     else:
