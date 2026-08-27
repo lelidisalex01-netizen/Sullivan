@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 import math
 import html
 
-st.set_page_config(page_title="Sullivan V21.2.2", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V22.0", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -350,13 +350,36 @@ def connect():
 
 def write(fn):
     c=connect()
+    committed=False
+    result=None
     try:
-        c.execute("BEGIN IMMEDIATE;"); result=fn(c); c.execute("COMMIT;"); return result
+        c.execute("BEGIN IMMEDIATE;")
+        result=fn(c)
+        c.execute("COMMIT;")
+        committed=True
     except Exception:
-        try: c.execute("ROLLBACK;")
-        except: pass
+        try:
+            c.execute("ROLLBACK;")
+        except Exception:
+            pass
         raise
-    finally: c.close()
+    finally:
+        c.close()
+
+    # V22: every successful Sullivan mutation gets a durable Supabase snapshot.
+    # Persistence errors are isolated from the accounting transaction itself.
+    if committed:
+        try:
+            backup_fn=globals().get("v22_cloud_backup")
+            if callable(backup_fn):
+                backup_fn(reason="database_write")
+        except Exception as e:
+            try:
+                print(f"V22 persistence warning after write: {type(e).__name__}: {e}")
+            except Exception:
+                pass
+
+    return result
 
 def read(q,p=()):
     c=connect()
@@ -3967,6 +3990,497 @@ def supabase_headers():
     }
 
 
+# ============================================================
+# V22 — DURABLE SULLIVAN CLOUD PERSISTENCE
+# ============================================================
+#
+# WHY THIS EXISTS
+# ---------------
+# Sullivan's existing bookkeeping engine uses SQLite + workspace-specific
+# physical tables. Streamlit Cloud filesystems are not durable enough to be
+# the only copy of financial records.
+#
+# V22 therefore keeps the working SQLite engine unchanged (low regression risk)
+# while making Supabase Storage the durable recovery layer:
+#
+#   1. Cold Streamlit Cloud start -> restore latest Sullivan bundle.
+#   2. Every successful write()   -> create a consistent SQLite snapshot.
+#   3. Upload DB + documents + exports to a private Supabase Storage bucket.
+#   4. A deployment/restart can restore the complete Sullivan state.
+#
+# This protects ALL current SQLite tables automatically, including future tables,
+# rather than requiring each feature to remember to implement its own persistence.
+#
+# IMPORTANT:
+# Local development is deliberately excluded by default so a localhost test
+# cannot overwrite the production Sullivan backup just because it uses the same
+# Supabase secrets.
+
+V22_PERSISTENCE_VERSION = "22.0"
+V22_DEFAULT_BUCKET = "sullivan-persistence"
+V22_LATEST_OBJECT = "production/latest.zip"
+V22_RESTORE_MARKER = APP_DIR / ".sullivan_v22_cloud_restored"
+V22_TEMP_DIR = APP_DIR / ".sullivan_v22_tmp"
+V22_TEMP_DIR.mkdir(exist_ok=True)
+
+_V22_PERSISTENCE_STATUS = {
+    "enabled": False,
+    "state": "not_checked",
+    "last_backup": "",
+    "last_restore": "",
+    "last_error": "",
+    "object": V22_LATEST_OBJECT,
+}
+
+
+def v22_is_streamlit_cloud():
+    """
+    Protect production storage from local test instances.
+    Streamlit Cloud app paths in Sullivan are /mount/src/<repo>/...
+    A force switch exists only for controlled environments.
+    """
+    forced = str(_secret_value("SULLIVAN_PERSISTENCE_FORCE", "")).strip().lower()
+    if forced in ("1", "true", "yes", "on"):
+        return True
+    if forced in ("0", "false", "no", "off"):
+        return False
+
+    app_path = str(APP_DIR).replace("\\", "/").lower()
+    if app_path.startswith("/mount/src/"):
+        return True
+
+    cloud_hint = str(os.getenv("STREAMLIT_SHARING_MODE", "") or "").lower()
+    return cloud_hint in ("streamlit_cloud", "cloud")
+
+
+def v22_persistence_bucket():
+    return _secret_value("SULLIVAN_PERSISTENCE_BUCKET", V22_DEFAULT_BUCKET) or V22_DEFAULT_BUCKET
+
+
+def v22_cloud_persistence_enabled():
+    enabled = bool(v22_is_streamlit_cloud() and supabase_ready())
+    _V22_PERSISTENCE_STATUS["enabled"] = enabled
+    return enabled
+
+
+def v22_storage_headers(content_type=None):
+    secret = supabase_secret_key()
+    headers = {
+        "apikey": secret,
+        "Authorization": f"Bearer {secret}",
+    }
+    if content_type:
+        headers["Content-Type"] = content_type
+    return headers
+
+
+def v22_storage_base():
+    return f"{supabase_url().rstrip('/')}/storage/v1"
+
+
+def v22_ensure_bucket():
+    """
+    Create the private persistence bucket if the configured Supabase key permits it.
+    Existing bucket responses are treated as success.
+    """
+    if not v22_cloud_persistence_enabled():
+        return False
+
+    bucket = v22_persistence_bucket()
+    url = f"{v22_storage_base()}/bucket"
+    payload = {
+        "id": bucket,
+        "name": bucket,
+        "public": False,
+        "file_size_limit": 104857600,  # 100 MB safety ceiling for the current architecture.
+    }
+
+    try:
+        r = requests.post(
+            url,
+            headers=v22_storage_headers("application/json"),
+            json=payload,
+            timeout=12,
+        )
+        if r.status_code in (200, 201):
+            return True
+
+        # Supabase may answer 400/409 when the bucket already exists.
+        body = (r.text or "").lower()
+        if r.status_code in (400, 409) and (
+            "already exists" in body or
+            "duplicate" in body or
+            "existing" in body
+        ):
+            return True
+
+        # Confirm existence explicitly.
+        check = requests.get(
+            f"{v22_storage_base()}/bucket/{bucket}",
+            headers=v22_storage_headers(),
+            timeout=10,
+        )
+        if check.status_code == 200:
+            return True
+
+        raise RuntimeError(
+            f"Could not create/find Supabase Storage bucket "
+            f"({r.status_code}: {(r.text or '')[:220]})"
+        )
+    except Exception as e:
+        _V22_PERSISTENCE_STATUS["last_error"] = f"{type(e).__name__}: {e}"
+        raise
+
+
+def v22_sqlite_snapshot(destination):
+    """
+    Use SQLite's backup API so WAL-mode writes are captured consistently.
+    Copying only sullivan.db directly can miss uncheckpointed WAL data.
+    """
+    destination = Path(destination)
+    if destination.exists():
+        destination.unlink()
+
+    source_conn = sqlite3.connect(DB_PATH, timeout=20)
+    dest_conn = sqlite3.connect(destination)
+    try:
+        source_conn.execute("PRAGMA busy_timeout=20000;")
+        source_conn.backup(dest_conn)
+        dest_conn.commit()
+    finally:
+        dest_conn.close()
+        source_conn.close()
+
+
+def v22_database_manifest(db_path):
+    """
+    Create diagnostics without exposing actual financial row contents.
+    """
+    manifest = {
+        "persistence_version": V22_PERSISTENCE_VERSION,
+        "created_at_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "database_file": "sullivan.db",
+        "tables": {},
+    }
+
+    c = sqlite3.connect(db_path)
+    try:
+        rows = c.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        ).fetchall()
+        for (table_name,) in rows:
+            try:
+                count = int(c.execute(
+                    f'SELECT COUNT(*) FROM "{table_name}"'
+                ).fetchone()[0])
+            except Exception:
+                count = None
+            manifest["tables"][str(table_name)] = count
+    finally:
+        c.close()
+
+    return manifest
+
+
+def v22_make_bundle():
+    """
+    Build one restorable Sullivan bundle:
+      - consistent sullivan.db snapshot
+      - documents/*
+      - exports/*
+      - manifest.json
+    """
+    stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    db_snapshot = V22_TEMP_DIR / f"sullivan_snapshot_{stamp}.db"
+    bundle = V22_TEMP_DIR / f"sullivan_bundle_{stamp}.zip"
+
+    v22_sqlite_snapshot(db_snapshot)
+    manifest = v22_database_manifest(db_snapshot)
+
+    with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_DEFLATED) as z:
+        z.write(db_snapshot, arcname="sullivan.db")
+        z.writestr(
+            "manifest.json",
+            json.dumps(manifest, indent=2, sort_keys=True),
+        )
+
+        for folder, prefix in ((DOC_DIR, "documents"), (EXPORT_DIR, "exports")):
+            if folder.exists():
+                for file_path in folder.rglob("*"):
+                    if file_path.is_file():
+                        relative = file_path.relative_to(folder)
+                        z.write(file_path, arcname=str(Path(prefix) / relative))
+
+    try:
+        db_snapshot.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+    return bundle, manifest
+
+
+def v22_upload_object(local_file, object_path):
+    if not v22_ensure_bucket():
+        raise RuntimeError("Sullivan cloud persistence is not enabled.")
+
+    bucket = v22_persistence_bucket()
+    url = f"{v22_storage_base()}/object/{bucket}/{object_path}"
+
+    with open(local_file, "rb") as fh:
+        r = requests.post(
+            url,
+            headers={
+                **v22_storage_headers("application/zip"),
+                "x-upsert": "true",
+            },
+            data=fh,
+            timeout=45,
+        )
+
+    if r.status_code not in (200, 201):
+        raise RuntimeError(
+            f"Supabase backup upload failed "
+            f"({r.status_code}: {(r.text or '')[:260]})"
+        )
+
+
+def v22_cloud_backup(reason="manual"):
+    """
+    Persist the COMPLETE current Sullivan state.
+
+    This is deliberately synchronous in V22.0. Financial durability is more
+    important than shaving a fraction of a second from a write while Sullivan
+    is still operating as a single Streamlit application.
+    """
+    if not v22_cloud_persistence_enabled():
+        return {
+            "ok": False,
+            "skipped": True,
+            "reason": "not_streamlit_cloud_or_missing_supabase",
+        }
+
+    bundle = None
+    try:
+        bundle, manifest = v22_make_bundle()
+        v22_upload_object(bundle, V22_LATEST_OBJECT)
+
+        # Keep occasional immutable recovery points in addition to latest.zip.
+        # One per day prevents unlimited growth from every database mutation.
+        daily_object = (
+            "history/"
+            + datetime.utcnow().strftime("%Y/%m/%d")
+            + "/daily-latest.zip"
+        )
+        try:
+            v22_upload_object(bundle, daily_object)
+        except Exception:
+            # latest.zip is the durability-critical object.
+            pass
+
+        stamp = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        _V22_PERSISTENCE_STATUS.update({
+            "state": "protected",
+            "last_backup": stamp,
+            "last_error": "",
+            "object": V22_LATEST_OBJECT,
+        })
+
+        print(
+            f"V22 cloud backup complete | reason={reason} | "
+            f"tables={len(manifest.get('tables', {}))}"
+        )
+        return {
+            "ok": True,
+            "timestamp": stamp,
+            "tables": len(manifest.get("tables", {})),
+        }
+
+    except Exception as e:
+        message = f"{type(e).__name__}: {e}"
+        _V22_PERSISTENCE_STATUS.update({
+            "state": "backup_error",
+            "last_error": message,
+        })
+        print(f"V22 cloud backup failed | reason={reason} | {message}")
+        return {"ok": False, "error": message}
+
+    finally:
+        if bundle is not None:
+            try:
+                Path(bundle).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+def v22_download_latest_bundle():
+    if not v22_cloud_persistence_enabled():
+        return None
+
+    bucket = v22_persistence_bucket()
+    url = (
+        f"{v22_storage_base()}/object/authenticated/"
+        f"{bucket}/{V22_LATEST_OBJECT}"
+    )
+
+    r = requests.get(
+        url,
+        headers=v22_storage_headers(),
+        timeout=45,
+    )
+
+    if r.status_code == 404:
+        return None
+
+    if r.status_code != 200:
+        raise RuntimeError(
+            f"Supabase restore download failed "
+            f"({r.status_code}: {(r.text or '')[:260]})"
+        )
+
+    target = V22_TEMP_DIR / "restore_latest.zip"
+    target.write_bytes(r.content)
+    return target
+
+
+def v22_safe_extract_bundle(bundle_path, destination):
+    destination = Path(destination).resolve()
+    with zipfile.ZipFile(bundle_path, "r") as z:
+        for member in z.infolist():
+            candidate = (destination / member.filename).resolve()
+            if destination not in candidate.parents and candidate != destination:
+                raise RuntimeError("Unsafe path found in Sullivan backup archive.")
+        z.extractall(destination)
+
+
+def v22_restore_bundle(bundle_path):
+    """
+    Restore DB + document/export files before init_db() opens the database.
+    """
+    restore_dir = V22_TEMP_DIR / "restore_unpack"
+    if restore_dir.exists():
+        shutil.rmtree(restore_dir, ignore_errors=True)
+    restore_dir.mkdir(parents=True, exist_ok=True)
+
+    v22_safe_extract_bundle(bundle_path, restore_dir)
+
+    restored_db = restore_dir / "sullivan.db"
+    if not restored_db.exists():
+        raise RuntimeError("Sullivan backup is missing sullivan.db.")
+
+    # Validate SQLite file before replacing the live database.
+    c = sqlite3.connect(restored_db)
+    try:
+        integrity = c.execute("PRAGMA integrity_check;").fetchone()
+        if not integrity or str(integrity[0]).lower() != "ok":
+            raise RuntimeError(
+                f"Restored Sullivan database failed integrity check: {integrity}"
+            )
+    finally:
+        c.close()
+
+    replacement = APP_DIR / ".sullivan_restore_replacement.db"
+    shutil.copy2(restored_db, replacement)
+    os.replace(replacement, DB_PATH)
+
+    # Old WAL/shm files must never survive a database replacement.
+    for suffix in ("-wal", "-shm"):
+        try:
+            Path(str(DB_PATH) + suffix).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    for source_name, target_dir in (
+        ("documents", DOC_DIR),
+        ("exports", EXPORT_DIR),
+    ):
+        source = restore_dir / source_name
+        if source.exists():
+            target_dir.mkdir(exist_ok=True)
+            # Cloud bundle is canonical on cold start.
+            for child in target_dir.iterdir():
+                try:
+                    if child.is_dir():
+                        shutil.rmtree(child)
+                    else:
+                        child.unlink()
+                except Exception:
+                    pass
+            for child in source.iterdir():
+                target = target_dir / child.name
+                if child.is_dir():
+                    shutil.copytree(child, target, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(child, target)
+
+    shutil.rmtree(restore_dir, ignore_errors=True)
+
+
+def v22_restore_from_cloud_once():
+    """
+    Called before Sullivan initializes its SQLite schema.
+
+    Marker prevents repeated downloads on every Streamlit rerun while still
+    restoring automatically on a fresh Streamlit Cloud container/deployment.
+    """
+    if not v22_cloud_persistence_enabled():
+        _V22_PERSISTENCE_STATUS["state"] = "local_mode"
+        return {"ok": False, "skipped": True, "reason": "local_mode"}
+
+    if V22_RESTORE_MARKER.exists():
+        _V22_PERSISTENCE_STATUS["state"] = "protected"
+        return {"ok": True, "skipped": True, "reason": "already_restored_this_container"}
+
+    try:
+        bundle = v22_download_latest_bundle()
+
+        if bundle is None:
+            # First V22 run: there is nothing to restore yet. The following
+            # init_db()/writes will create the first durable cloud backup.
+            V22_RESTORE_MARKER.write_text(
+                datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                encoding="utf-8",
+            )
+            _V22_PERSISTENCE_STATUS.update({
+                "state": "first_backup_pending",
+                "last_error": "",
+            })
+            print("V22 persistence: no remote bundle yet; first backup will initialize it.")
+            return {"ok": True, "restored": False, "first_run": True}
+
+        v22_restore_bundle(bundle)
+        try:
+            Path(bundle).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+        stamp = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        V22_RESTORE_MARKER.write_text(stamp, encoding="utf-8")
+        _V22_PERSISTENCE_STATUS.update({
+            "state": "restored",
+            "last_restore": stamp,
+            "last_error": "",
+        })
+
+        print("V22 persistence: restored complete Sullivan state from Supabase.")
+        return {"ok": True, "restored": True, "timestamp": stamp}
+
+    except Exception as e:
+        # Never replace a local database with an unverified/failed download.
+        message = f"{type(e).__name__}: {e}"
+        _V22_PERSISTENCE_STATUS.update({
+            "state": "restore_error",
+            "last_error": message,
+        })
+        print(f"V22 cloud restore failed safely: {message}")
+        return {"ok": False, "error": message}
+
+
+def v22_persistence_status():
+    return dict(_V22_PERSISTENCE_STATUS)
+
+
+
 def v19_supabase_subscription(company_id):
     """
     Read the authoritative Sullivan billing record from Supabase.
@@ -4289,9 +4803,12 @@ def require_company_role(*roles):
     return role in roles
 
 
+# V22: restore durable cloud state BEFORE SQLite schema/bootstrap writes.
+v22_restore_from_cloud_once()
+
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V21.2.2</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.0</span></div>",unsafe_allow_html=True)
 
 
 
@@ -11153,6 +11670,43 @@ with main_sections[5]:
                 "Billing API keys, Supabase credentials, Google authentication credentials, "
                 "and OpenAI keys stay in deployment secrets and are never displayed here."
             )
+            
+            st.markdown("### Data Protection")
+            _v22ps = v22_persistence_status()
+            if v22_cloud_persistence_enabled():
+                if _v22ps.get("state") in ("protected","restored"):
+                    st.success("☁️ Sullivan Cloud Persistence is active.")
+                elif _v22ps.get("state") == "first_backup_pending":
+                    st.info("☁️ Sullivan Cloud Persistence is initializing its first durable backup.")
+                else:
+                    st.warning(
+                        "Cloud persistence is configured, but Sullivan has not confirmed the latest backup yet."
+                    )
+
+                st.caption(
+                    "Sullivan automatically protects the complete database, workspace records, "
+                    "documents, and exports in private Supabase Storage after successful changes."
+                )
+
+                if _v22ps.get("last_backup"):
+                    st.write(f"**Last cloud backup:** {_v22ps['last_backup']}")
+                if _v22ps.get("last_restore"):
+                    st.write(f"**Last cloud restore:** {_v22ps['last_restore']}")
+                if _v22ps.get("last_error"):
+                    st.error(f"Persistence diagnostic: {_v22ps['last_error']}")
+
+                if st.button("Back up Sullivan now", key="v22_backup_now", width="content"):
+                    with st.spinner("Creating a complete Sullivan cloud backup…"):
+                        _v22backup = v22_cloud_backup(reason="manual_settings")
+                    if _v22backup.get("ok"):
+                        st.success("Complete Sullivan backup saved to Supabase.")
+                    else:
+                        st.error(_v22backup.get("error") or "Backup could not be completed.")
+            else:
+                st.info(
+                    "Cloud persistence is disabled in this local/development environment. "
+                    "This prevents localhost testing from overwriting production financial data."
+                )
 
 # V18.3 navigation / action clarity
 if st.session_state.get("v13_destination"):
