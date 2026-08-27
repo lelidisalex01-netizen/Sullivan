@@ -16,7 +16,7 @@ import math
 import html
 import time
 
-st.set_page_config(page_title="Sullivan V22.0.4", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V22.0.5", page_icon="S", layout="wide")
 
 st.markdown(r"""
 <style>
@@ -4069,7 +4069,7 @@ def supabase_headers():
 # cannot overwrite the production Sullivan backup just because it uses the same
 # Supabase secrets.
 
-V22_PERSISTENCE_VERSION = "22.0.4"
+V22_PERSISTENCE_VERSION = "22.0.5"
 V22_DEFAULT_BUCKET = "sullivan-persistence"
 
 # Legacy whole-file object retained only as a restore fallback for any earlier V22 backup.
@@ -5168,7 +5168,7 @@ v17_init_auth_tables()
 
 # V22.0.2 automatic cloud safety backup.
 v22_autosave_fragment()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.0.4</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.0.5</span></div>",unsafe_allow_html=True)
 
 
 
@@ -6497,6 +6497,57 @@ button[data-baseweb="tab"]:not([aria-selected="true"]) p {
 _theme_user = current_user()
 _theme_name = get_user_ui_theme(_theme_user["id"]) if _theme_user else "Light"
 st.session_state["v19_ui_theme"] = _theme_name
+
+# V22.0.5 — force Streamlit/BaseWeb select chevrons to contrast with
+# Sullivan's actual in-app theme (not the computer/browser theme).
+# `filter` is used because newer Streamlit versions can render the chevron
+# with internal SVG styling that ignores normal fill/color overrides.
+if _theme_name == "Dark":
+    st.markdown("""
+    <style>
+    [data-testid="stSelectbox"] div[data-baseweb="select"] svg,
+    [data-testid="stMultiSelect"] div[data-baseweb="select"] svg,
+    [data-testid="stSidebar"] div[data-baseweb="select"] svg,
+    div[data-baseweb="select"] svg {
+        filter: brightness(0) invert(1) !important;
+        opacity: 1 !important;
+    }
+    [data-testid="stSelectbox"] div[data-baseweb="select"] svg path,
+    [data-testid="stMultiSelect"] div[data-baseweb="select"] svg path,
+    [data-testid="stSidebar"] div[data-baseweb="select"] svg path,
+    div[data-baseweb="select"] svg path {
+        fill: #FFFFFF !important;
+        stroke: #FFFFFF !important;
+    }
+    span[data-baseweb="icon"] {
+        color: #FFFFFF !important;
+        -webkit-text-fill-color: #FFFFFF !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+else:
+    st.markdown("""
+    <style>
+    [data-testid="stSelectbox"] div[data-baseweb="select"] svg,
+    [data-testid="stMultiSelect"] div[data-baseweb="select"] svg,
+    [data-testid="stSidebar"] div[data-baseweb="select"] svg,
+    div[data-baseweb="select"] svg {
+        filter: brightness(0) !important;
+        opacity: 1 !important;
+    }
+    [data-testid="stSelectbox"] div[data-baseweb="select"] svg path,
+    [data-testid="stMultiSelect"] div[data-baseweb="select"] svg path,
+    [data-testid="stSidebar"] div[data-baseweb="select"] svg path,
+    div[data-baseweb="select"] svg path {
+        fill: #111111 !important;
+        stroke: #111111 !important;
+    }
+    span[data-baseweb="icon"] {
+        color: #111111 !important;
+        -webkit-text-fill-color: #111111 !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
 if _theme_name == "Dark":
     st.markdown("""
