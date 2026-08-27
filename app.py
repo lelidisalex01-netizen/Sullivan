@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 import math
 import html
 
-st.set_page_config(page_title="Sullivan V22.0", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V22.0.1", page_icon="S", layout="wide")
 
 
 # Sullivan V19 visual system: calm navy + blue + mint + warm amber.
@@ -4016,9 +4016,18 @@ def supabase_headers():
 # cannot overwrite the production Sullivan backup just because it uses the same
 # Supabase secrets.
 
-V22_PERSISTENCE_VERSION = "22.0"
+V22_PERSISTENCE_VERSION = "22.0.1"
 V22_DEFAULT_BUCKET = "sullivan-persistence"
+
+# Legacy whole-file object retained only as a restore fallback for any earlier V22 backup.
 V22_LATEST_OBJECT = "production/latest.zip"
+
+# V22.0.1 stores backups in small pieces so Supabase Storage object-size limits
+# cannot block Sullivan persistence as the database/documents grow.
+V22_LATEST_MANIFEST_OBJECT = "production/latest-manifest.json"
+V22_LATEST_CHUNK_PREFIX = "production/chunks/latest"
+V22_CHUNK_SIZE = 4 * 1024 * 1024  # 4 MiB per object
+
 V22_RESTORE_MARKER = APP_DIR / ".sullivan_v22_cloud_restored"
 V22_TEMP_DIR = APP_DIR / ".sullivan_v22_tmp"
 V22_TEMP_DIR.mkdir(exist_ok=True)
@@ -4080,32 +4089,44 @@ def v22_storage_base():
 
 def v22_ensure_bucket():
     """
-    Create the private persistence bucket if the configured Supabase key permits it.
-    Existing bucket responses are treated as success.
+    Ensure Sullivan's private Supabase Storage bucket exists.
+
+    V22.0 requested a 100MB `file_size_limit` while creating the bucket.
+    Some Supabase projects reject that configuration with HTTP 413 before any
+    Sullivan backup is even uploaded. V22.0.1 intentionally uses the project's
+    normal Storage limit and keeps every backup object small through chunking.
     """
     if not v22_cloud_persistence_enabled():
         return False
 
     bucket = v22_persistence_bucket()
-    url = f"{v22_storage_base()}/bucket"
-    payload = {
-        "id": bucket,
-        "name": bucket,
-        "public": False,
-        "file_size_limit": 104857600,  # 100 MB safety ceiling for the current architecture.
-    }
 
     try:
+        # Check first. This avoids repeatedly trying to create an existing bucket.
+        check = requests.get(
+            f"{v22_storage_base()}/bucket/{bucket}",
+            headers=v22_storage_headers(),
+            timeout=10,
+        )
+        if check.status_code == 200:
+            return True
+
+        payload = {
+            "id": bucket,
+            "name": bucket,
+            "public": False,
+        }
+
         r = requests.post(
-            url,
+            f"{v22_storage_base()}/bucket",
             headers=v22_storage_headers("application/json"),
             json=payload,
             timeout=12,
         )
+
         if r.status_code in (200, 201):
             return True
 
-        # Supabase may answer 400/409 when the bucket already exists.
         body = (r.text or "").lower()
         if r.status_code in (400, 409) and (
             "already exists" in body or
@@ -4114,7 +4135,7 @@ def v22_ensure_bucket():
         ):
             return True
 
-        # Confirm existence explicitly.
+        # One final check in case Supabase returned a non-standard creation response.
         check = requests.get(
             f"{v22_storage_base()}/bucket/{bucket}",
             headers=v22_storage_headers(),
@@ -4127,6 +4148,7 @@ def v22_ensure_bucket():
             f"Could not create/find Supabase Storage bucket "
             f"({r.status_code}: {(r.text or '')[:220]})"
         )
+
     except Exception as e:
         _V22_PERSISTENCE_STATUS["last_error"] = f"{type(e).__name__}: {e}"
         raise
@@ -4220,107 +4242,54 @@ def v22_make_bundle():
     return bundle, manifest
 
 
-def v22_upload_object(local_file, object_path):
+def v22_upload_bytes(data, object_path, content_type="application/octet-stream"):
+    """
+    Upload one small object to the private Sullivan persistence bucket.
+    """
     if not v22_ensure_bucket():
         raise RuntimeError("Sullivan cloud persistence is not enabled.")
 
     bucket = v22_persistence_bucket()
     url = f"{v22_storage_base()}/object/{bucket}/{object_path}"
 
-    with open(local_file, "rb") as fh:
-        r = requests.post(
-            url,
-            headers={
-                **v22_storage_headers("application/zip"),
-                "x-upsert": "true",
-            },
-            data=fh,
-            timeout=45,
-        )
+    r = requests.post(
+        url,
+        headers={
+            **v22_storage_headers(content_type),
+            "x-upsert": "true",
+        },
+        data=data,
+        timeout=45,
+    )
 
     if r.status_code not in (200, 201):
         raise RuntimeError(
-            f"Supabase backup upload failed "
+            f"Supabase backup upload failed for {object_path} "
             f"({r.status_code}: {(r.text or '')[:260]})"
         )
 
 
-def v22_cloud_backup(reason="manual"):
+def v22_upload_object(local_file, object_path, content_type="application/octet-stream"):
     """
-    Persist the COMPLETE current Sullivan state.
-
-    This is deliberately synchronous in V22.0. Financial durability is more
-    important than shaving a fraction of a second from a write while Sullivan
-    is still operating as a single Streamlit application.
+    Compatibility helper for one small file.
+    Large Sullivan backups use v22_upload_bundle_chunked().
     """
-    if not v22_cloud_persistence_enabled():
-        return {
-            "ok": False,
-            "skipped": True,
-            "reason": "not_streamlit_cloud_or_missing_supabase",
-        }
-
-    bundle = None
-    try:
-        bundle, manifest = v22_make_bundle()
-        v22_upload_object(bundle, V22_LATEST_OBJECT)
-
-        # Keep occasional immutable recovery points in addition to latest.zip.
-        # One per day prevents unlimited growth from every database mutation.
-        daily_object = (
-            "history/"
-            + datetime.utcnow().strftime("%Y/%m/%d")
-            + "/daily-latest.zip"
-        )
-        try:
-            v22_upload_object(bundle, daily_object)
-        except Exception:
-            # latest.zip is the durability-critical object.
-            pass
-
-        stamp = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-        _V22_PERSISTENCE_STATUS.update({
-            "state": "protected",
-            "last_backup": stamp,
-            "last_error": "",
-            "object": V22_LATEST_OBJECT,
-        })
-
-        print(
-            f"V22 cloud backup complete | reason={reason} | "
-            f"tables={len(manifest.get('tables', {}))}"
-        )
-        return {
-            "ok": True,
-            "timestamp": stamp,
-            "tables": len(manifest.get("tables", {})),
-        }
-
-    except Exception as e:
-        message = f"{type(e).__name__}: {e}"
-        _V22_PERSISTENCE_STATUS.update({
-            "state": "backup_error",
-            "last_error": message,
-        })
-        print(f"V22 cloud backup failed | reason={reason} | {message}")
-        return {"ok": False, "error": message}
-
-    finally:
-        if bundle is not None:
-            try:
-                Path(bundle).unlink(missing_ok=True)
-            except Exception:
-                pass
+    with open(local_file, "rb") as fh:
+        v22_upload_bytes(fh.read(), object_path, content_type=content_type)
 
 
-def v22_download_latest_bundle():
+def v22_download_object_bytes(object_path):
+    """
+    Download a private Supabase Storage object.
+    Returns None when the object does not exist.
+    """
     if not v22_cloud_persistence_enabled():
         return None
 
     bucket = v22_persistence_bucket()
     url = (
         f"{v22_storage_base()}/object/authenticated/"
-        f"{bucket}/{V22_LATEST_OBJECT}"
+        f"{bucket}/{object_path}"
     )
 
     r = requests.get(
@@ -4334,12 +4303,254 @@ def v22_download_latest_bundle():
 
     if r.status_code != 200:
         raise RuntimeError(
-            f"Supabase restore download failed "
+            f"Supabase restore download failed for {object_path} "
             f"({r.status_code}: {(r.text or '')[:260]})"
         )
 
+    return bytes(r.content)
+
+
+def v22_upload_bundle_chunked(bundle_path, manifest_object, chunk_prefix):
+    """
+    Split a Sullivan backup bundle into small Storage objects.
+
+    The manifest is uploaded LAST. That gives Sullivan a simple commit point:
+    if a deployment dies halfway through a backup, the previous manifest remains
+    authoritative and the incomplete new chunks are never treated as a backup.
+    """
+    bundle_path = Path(bundle_path)
+    total_size = bundle_path.stat().st_size
+    bundle_sha256 = hashlib.sha256()
+    chunks = []
+
+    with open(bundle_path, "rb") as fh:
+        index = 0
+        while True:
+            data = fh.read(V22_CHUNK_SIZE)
+            if not data:
+                break
+
+            bundle_sha256.update(data)
+            chunk_sha = hashlib.sha256(data).hexdigest()
+            object_path = f"{chunk_prefix}-part-{index:05d}.bin"
+
+            v22_upload_bytes(
+                data,
+                object_path,
+                content_type="application/octet-stream",
+            )
+
+            chunks.append({
+                "index": index,
+                "object": object_path,
+                "size": len(data),
+                "sha256": chunk_sha,
+            })
+            index += 1
+
+    if not chunks:
+        raise RuntimeError("Sullivan created an empty persistence bundle.")
+
+    manifest = {
+        "format": "sullivan-chunked-backup-v1",
+        "persistence_version": V22_PERSISTENCE_VERSION,
+        "created_at_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "bundle_size": total_size,
+        "bundle_sha256": bundle_sha256.hexdigest(),
+        "chunk_size": V22_CHUNK_SIZE,
+        "chunk_count": len(chunks),
+        "chunks": chunks,
+    }
+
+    # Manifest is the final commit marker.
+    v22_upload_bytes(
+        json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8"),
+        manifest_object,
+        content_type="application/json",
+    )
+
+    return manifest
+
+
+def v22_download_chunked_bundle(manifest_object, target_path):
+    """
+    Rebuild and cryptographically verify the latest Sullivan ZIP bundle.
+    Returns None when no chunked backup exists yet.
+    """
+    raw_manifest = v22_download_object_bytes(manifest_object)
+    if raw_manifest is None:
+        return None
+
+    try:
+        manifest = json.loads(raw_manifest.decode("utf-8"))
+    except Exception as e:
+        raise RuntimeError(f"Sullivan backup manifest is invalid JSON: {e}")
+
+    if manifest.get("format") != "sullivan-chunked-backup-v1":
+        raise RuntimeError("Unsupported Sullivan backup manifest format.")
+
+    chunks = list(manifest.get("chunks") or [])
+    if not chunks:
+        raise RuntimeError("Sullivan backup manifest contains no chunks.")
+
+    target_path = Path(target_path)
+    target_path.unlink(missing_ok=True)
+
+    whole_hash = hashlib.sha256()
+    written = 0
+
+    with open(target_path, "wb") as out_fh:
+        for expected_index, chunk_meta in enumerate(chunks):
+            if int(chunk_meta.get("index", -1)) != expected_index:
+                raise RuntimeError("Sullivan backup chunk ordering is invalid.")
+
+            object_path = str(chunk_meta.get("object") or "")
+            if not object_path:
+                raise RuntimeError("Sullivan backup manifest contains a missing chunk path.")
+
+            data = v22_download_object_bytes(object_path)
+            if data is None:
+                raise RuntimeError(
+                    f"Sullivan backup is incomplete; missing chunk {expected_index}."
+                )
+
+            expected_size = int(chunk_meta.get("size") or 0)
+            if len(data) != expected_size:
+                raise RuntimeError(
+                    f"Sullivan backup chunk {expected_index} has the wrong size."
+                )
+
+            expected_sha = str(chunk_meta.get("sha256") or "")
+            actual_sha = hashlib.sha256(data).hexdigest()
+            if not expected_sha or actual_sha != expected_sha:
+                raise RuntimeError(
+                    f"Sullivan backup chunk {expected_index} failed integrity verification."
+                )
+
+            out_fh.write(data)
+            whole_hash.update(data)
+            written += len(data)
+
+    expected_total = int(manifest.get("bundle_size") or 0)
+    if expected_total and written != expected_total:
+        target_path.unlink(missing_ok=True)
+        raise RuntimeError("Reconstructed Sullivan backup has the wrong total size.")
+
+    expected_bundle_sha = str(manifest.get("bundle_sha256") or "")
+    if expected_bundle_sha and whole_hash.hexdigest() != expected_bundle_sha:
+        target_path.unlink(missing_ok=True)
+        raise RuntimeError("Reconstructed Sullivan backup failed SHA-256 verification.")
+
+    return target_path
+
+
+def v22_cloud_backup(reason="manual"):
+    """
+    Persist the complete Sullivan state using small Supabase Storage objects.
+
+    V22.0.1 no longer depends on one large ZIP object. This protects Sullivan
+    from per-object upload limits while preserving the full SQLite + files
+    recovery model.
+    """
+    if not v22_cloud_persistence_enabled():
+        return {
+            "ok": False,
+            "skipped": True,
+            "reason": "not_streamlit_cloud_or_missing_supabase",
+        }
+
+    bundle = None
+    try:
+        bundle, db_manifest = v22_make_bundle()
+
+        cloud_manifest = v22_upload_bundle_chunked(
+            bundle,
+            V22_LATEST_MANIFEST_OBJECT,
+            V22_LATEST_CHUNK_PREFIX,
+        )
+
+        # One daily restore point. Chunks remain small here too.
+        date_prefix = datetime.utcnow().strftime("%Y/%m/%d")
+        daily_manifest_object = f"history/{date_prefix}/daily-manifest.json"
+        daily_chunk_prefix = f"history/{date_prefix}/chunks/daily"
+
+        try:
+            v22_upload_bundle_chunked(
+                bundle,
+                daily_manifest_object,
+                daily_chunk_prefix,
+            )
+        except Exception as daily_error:
+            print(
+                "V22 daily recovery-point warning: "
+                f"{type(daily_error).__name__}: {daily_error}"
+            )
+
+        stamp = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        _V22_PERSISTENCE_STATUS.update({
+            "state": "protected",
+            "last_backup": stamp,
+            "last_error": "",
+            "object": V22_LATEST_MANIFEST_OBJECT,
+        })
+
+        print(
+            f"V22.0.1 cloud backup complete | reason={reason} | "
+            f"tables={len(db_manifest.get('tables', {}))} | "
+            f"chunks={cloud_manifest.get('chunk_count')}"
+        )
+
+        return {
+            "ok": True,
+            "timestamp": stamp,
+            "tables": len(db_manifest.get("tables", {})),
+            "chunks": int(cloud_manifest.get("chunk_count") or 0),
+            "bytes": int(cloud_manifest.get("bundle_size") or 0),
+        }
+
+    except Exception as e:
+        message = f"{type(e).__name__}: {e}"
+        _V22_PERSISTENCE_STATUS.update({
+            "state": "backup_error",
+            "last_error": message,
+        })
+        print(f"V22.0.1 cloud backup failed | reason={reason} | {message}")
+        return {"ok": False, "error": message}
+
+    finally:
+        if bundle is not None:
+            try:
+                Path(bundle).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+def v22_download_latest_bundle():
+    """
+    Prefer V22.0.1 chunked backups.
+
+    If no manifest exists, fall back to the original V22.0 whole ZIP so an
+    older successful backup can still be restored.
+    """
+    if not v22_cloud_persistence_enabled():
+        return None
+
     target = V22_TEMP_DIR / "restore_latest.zip"
-    target.write_bytes(r.content)
+
+    # New chunked format.
+    chunked = v22_download_chunked_bundle(
+        V22_LATEST_MANIFEST_OBJECT,
+        target,
+    )
+    if chunked is not None:
+        return chunked
+
+    # Legacy V22.0 fallback.
+    legacy = v22_download_object_bytes(V22_LATEST_OBJECT)
+    if legacy is None:
+        return None
+
+    target.write_bytes(legacy)
     return target
 
 
@@ -4808,7 +5019,7 @@ v22_restore_from_cloud_once()
 
 init_db()
 v17_init_auth_tables()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.0</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.0.1</span></div>",unsafe_allow_html=True)
 
 
 
@@ -11685,7 +11896,8 @@ with main_sections[5]:
 
                 st.caption(
                     "Sullivan automatically protects the complete database, workspace records, "
-                    "documents, and exports in private Supabase Storage after successful changes."
+                    "documents, and exports in private Supabase Storage after successful changes. "
+                    "Backups are split into small verified chunks so Storage object-size limits do not block protection."
                 )
 
                 if _v22ps.get("last_backup"):
