@@ -16,10 +16,10 @@ import math
 import html
 import time
 
-st.set_page_config(page_title="Sullivan V22.0.6.1", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V22.0.7", page_icon="S", layout="wide")
 
 # ============================================================
-# V22.0.6.1 — GLOBAL COUNTRY + TAX-REGION ARCHITECTURE
+# V22.0.7 — GLOBAL COUNTRY + TAX-REGION ARCHITECTURE
 # ISO 3166 country/territory names and first-level subdivisions
 # are embedded so Sullivan does not depend on a runtime web call.
 # ============================================================
@@ -5248,7 +5248,7 @@ v17_init_auth_tables()
 
 # V22.0.2 automatic cloud safety backup.
 v22_autosave_fragment()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.0.6.1</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.0.7</span></div>",unsafe_allow_html=True)
 
 
 
@@ -5720,6 +5720,10 @@ with st.sidebar:
 
     with st.expander("⚙️  Business settings", expanded=True):
         bn=st.text_input("Business name",p0["business_name"])
+        _v2207_sync = st.session_state.pop("v2207_pending_sidebar_tax_sync", None)
+        if isinstance(_v2207_sync, dict):
+            st.session_state["v2206_sidebar_country"] = str(_v2207_sync.get("country") or p0.get("country","Canada"))
+            st.session_state["v2206_sidebar_region"] = str(_v2207_sync.get("region") or p0.get("region",""))
         _v2206_countries = v2206_country_names()
         country=st.selectbox(
             "Country",
@@ -5727,6 +5731,10 @@ with st.sidebar:
             index=v2206_country_index(p0.get("country","Canada")),
             key="v2206_sidebar_country"
         )
+        _v2207_prev_country = st.session_state.get("v2207_sidebar_prev_country")
+        if _v2207_prev_country is not None and _v2207_prev_country != country:
+            st.session_state.pop("v2206_sidebar_region", None)
+        st.session_state["v2207_sidebar_prev_country"] = country
         region=v2206_region_widget(
             "Province / State / Region",
             country,
@@ -6591,7 +6599,7 @@ st.session_state["v19_ui_theme"] = _theme_name
 
 st.markdown(r"""
 <style>
-/* V22.0.6.1: own the visible select chevron instead of relying on BaseWeb's SVG. */
+/* V22.0.7: own the visible select chevron instead of relying on BaseWeb's SVG. */
 div[data-baseweb="select"] > div:first-child {
     position: relative !important;
 }
@@ -6615,7 +6623,7 @@ div[data-baseweb="select"] > div:first-child > div:last-child::after {
 </style>
 """, unsafe_allow_html=True)
 
-# V22.0.6.1 — force Streamlit/BaseWeb select chevrons to contrast with
+# V22.0.7 — force Streamlit/BaseWeb select chevrons to contrast with
 # Sullivan's actual in-app theme (not the computer/browser theme).
 # `filter` is used because newer Streamlit versions can render the chevron
 # with internal SVG styling that ignores normal fill/color overrides.
@@ -8391,6 +8399,273 @@ V204_CANADA_REGIONS = [
     "Quebec","Saskatchewan","Yukon"
 ]
 
+
+# ============================================================
+# V22.0.7 — LIVE GLOBAL TAX PROFILE ENGINE
+# ============================================================
+# Built-in verified engines remain authoritative for Quebec and Virginia.
+# Other jurisdictions can be researched once with OpenAI web search, cached
+# locally, backed up by Sullivan persistence, and then calculated instantly.
+V2207_TAX_YEAR = 2026
+
+def v2207_tax_profile_table():
+    c = connect()
+    try:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS global_tax_profiles(
+                country TEXT NOT NULL,
+                region TEXT NOT NULL,
+                tax_year INTEGER NOT NULL,
+                filing_status TEXT NOT NULL,
+                currency TEXT,
+                profile_json TEXT NOT NULL,
+                researched_at TEXT,
+                PRIMARY KEY(country, region, tax_year, filing_status)
+            )
+        """)
+        c.commit()
+    finally:
+        c.close()
+
+def v2207_tax_profile_get(country, region, filing_status="Single"):
+    v2207_tax_profile_table()
+    c = connect()
+    try:
+        row = c.execute(
+            """SELECT profile_json FROM global_tax_profiles
+               WHERE country=? AND region=? AND tax_year=? AND filing_status=?""",
+            (str(country), str(region), V2207_TAX_YEAR, str(filing_status))
+        ).fetchone()
+    finally:
+        c.close()
+    if not row:
+        return None
+    try:
+        return json.loads(row[0])
+    except Exception:
+        return None
+
+def v2207_tax_profile_save(country, region, filing_status, profile):
+    v2207_tax_profile_table()
+    payload = json.dumps(profile, ensure_ascii=False)
+    currency = str(profile.get("currency") or "")
+    stamp = datetime.now().isoformat(timespec="seconds")
+    def _save(c):
+        c.execute(
+            """INSERT INTO global_tax_profiles(
+                   country,region,tax_year,filing_status,currency,profile_json,researched_at
+               ) VALUES(?,?,?,?,?,?,?)
+               ON CONFLICT(country,region,tax_year,filing_status)
+               DO UPDATE SET currency=excluded.currency,
+                             profile_json=excluded.profile_json,
+                             researched_at=excluded.researched_at""",
+            (str(country), str(region), V2207_TAX_YEAR, str(filing_status),
+             currency, payload, stamp)
+        )
+    write(_save)
+
+def v2207_extract_json(raw_text):
+    raw = str(raw_text or "").strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.I)
+        raw = re.sub(r"\s*```$", "", raw)
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+    m = re.search(r"\{.*\}", raw, flags=re.S)
+    if not m:
+        raise ValueError("Sullivan could not parse the researched tax profile.")
+    return json.loads(m.group(0))
+
+def v2207_research_global_tax_profile(country, region, filing_status="Single"):
+    if not key():
+        raise ValueError("Sullivan AI is not configured on this server.")
+
+    client = OpenAI(api_key=key())
+    prompt = f"""
+You are building a payroll planning profile for Sullivan accounting software.
+
+Research CURRENT 2026 employment-income tax rules for:
+Country: {country}
+State/province/region: {region}
+Filing status requested: {filing_status}
+
+Use web search and prefer official government/tax authority sources. If 2026
+official thresholds are not yet available, use the newest legally applicable
+rules and clearly state the year actually used.
+
+Assumptions:
+- ordinary resident employee
+- employment income only
+- no dependants
+- no special deductions or tax shelters
+- standard/basic personal allowance or credit only
+- thresholds must be ANNUALIZED and expressed in the LOCAL CURRENCY
+- include mandatory employee social/payroll contributions
+- include regional/local income tax when it normally applies
+- do NOT include employer-only payroll costs in employee take-home
+- do not invent a rate or threshold; omit a component if it cannot be verified
+
+Return ONLY valid JSON matching this shape:
+{{
+  "country": "...",
+  "region": "...",
+  "tax_year": 2026,
+  "rules_year_used": 2026,
+  "currency": "ISO 4217 code",
+  "coverage": "researched",
+  "income_tax_components": [
+    {{
+      "name": "tax name",
+      "deduction": 0.0,
+      "annual_credit": 0.0,
+      "flat_rate": null,
+      "brackets": [
+        {{"up_to": 50000.0, "rate": 0.10}},
+        {{"up_to": null, "rate": 0.20}}
+      ]
+    }}
+  ],
+  "employee_contributions": [
+    {{
+      "name": "contribution name",
+      "rate": 0.05,
+      "floor": 0.0,
+      "cap": null,
+      "fixed": 0.0
+    }}
+  ],
+  "notes": "short explanation of important simplifications",
+  "sources": [
+    {{"title": "official source title", "url": "https://..."}}
+  ]
+}}
+
+Rules for the JSON:
+- Rates must be decimals (15% = 0.15).
+- `up_to` is the upper bound of TAXABLE income for that bracket; null = no cap.
+- For progressive taxes, brackets must be cumulative and sorted.
+- If an income tax is flat, use flat_rate and an empty brackets list.
+- deduction is subtracted from gross before that component is calculated.
+- annual_credit is subtracted from the calculated tax after brackets/flat rate.
+- contribution amount is fixed + rate * max(0, min(gross, cap)-floor);
+  if there is no cap, cap must be null.
+- If a real system is too complex for this generic model, provide the closest
+  conservative planning approximation and explain the limitation in notes.
+"""
+    response = client.responses.create(
+        model=MODEL,
+        tools=[{"type": "web_search"}],
+        input=prompt,
+    )
+    profile = v2207_extract_json(response.output_text)
+
+    if not isinstance(profile, dict):
+        raise ValueError("Global tax research returned an invalid profile.")
+    if not str(profile.get("currency") or "").strip():
+        raise ValueError("Global tax research did not return a currency.")
+    if "income_tax_components" not in profile:
+        profile["income_tax_components"] = []
+    if "employee_contributions" not in profile:
+        profile["employee_contributions"] = []
+    profile["country"] = str(country)
+    profile["region"] = str(region)
+    profile["tax_year"] = V2207_TAX_YEAR
+    profile["researched_at"] = datetime.now().isoformat(timespec="seconds")
+    v2207_tax_profile_save(country, region, filing_status, profile)
+    return profile
+
+def v2207_progressive_component(taxable, brackets):
+    clean = []
+    for b in brackets or []:
+        try:
+            upper = b.get("up_to")
+            upper = None if upper is None else float(upper)
+            rate = max(0.0, float(b.get("rate") or 0.0))
+            clean.append((upper, rate))
+        except Exception:
+            continue
+
+    taxable = max(0.0, float(taxable or 0.0))
+    tax = 0.0
+    lower = 0.0
+    for upper, rate in clean:
+        if upper is None:
+            tax += max(0.0, taxable-lower) * rate
+            break
+        band = max(0.0, min(taxable, upper)-lower)
+        tax += band * rate
+        if taxable <= upper:
+            break
+        lower = upper
+    return max(0.0, tax)
+
+def v2207_apply_global_tax_profile(gross, profile):
+    gross = max(0.0, float(gross or 0.0))
+    income_total = 0.0
+    breakdown = []
+
+    for comp in profile.get("income_tax_components", []) or []:
+        try:
+            name = str(comp.get("name") or "Income tax")
+            deduction = max(0.0, float(comp.get("deduction") or 0.0))
+            taxable = max(0.0, gross-deduction)
+            flat_rate = comp.get("flat_rate")
+            if flat_rate is not None:
+                amount = taxable * max(0.0, float(flat_rate))
+            else:
+                amount = v2207_progressive_component(taxable, comp.get("brackets", []))
+            amount = max(0.0, amount-max(0.0, float(comp.get("annual_credit") or 0.0)))
+            income_total += amount
+            breakdown.append({"name": name, "amount": amount, "kind": "income_tax"})
+        except Exception:
+            continue
+
+    contrib_total = 0.0
+    for comp in profile.get("employee_contributions", []) or []:
+        try:
+            name = str(comp.get("name") or "Employee contribution")
+            rate = max(0.0, float(comp.get("rate") or 0.0))
+            floor = max(0.0, float(comp.get("floor") or 0.0))
+            cap_raw = comp.get("cap")
+            cap = gross if cap_raw is None else max(0.0, float(cap_raw))
+            fixed = max(0.0, float(comp.get("fixed") or 0.0))
+            base = max(0.0, min(gross, cap)-floor)
+            amount = fixed + rate*base
+            contrib_total += amount
+            breakdown.append({"name": name, "amount": amount, "kind": "contribution"})
+        except Exception:
+            continue
+
+    total = max(0.0, income_total+contrib_total)
+    return {
+        "federal": income_total,
+        "regional": 0.0,
+        "social": contrib_total,
+        "medicare": 0.0,
+        "employer_payroll": 0.0,
+        "total_employee_tax": total,
+        "estimated_net": max(0.0, gross-total),
+        "supported": True,
+        "coverage": "AI-researched global",
+        "currency": str(profile.get("currency") or ""),
+        "global_breakdown": breakdown,
+        "global_sources": profile.get("sources", []) or [],
+        "note": (
+            f"Global planning estimate using researched {profile.get('rules_year_used', profile.get('tax_year', V2207_TAX_YEAR))} "
+            f"rules for {profile.get('region','')}, {profile.get('country','')}. "
+            + str(profile.get("notes") or "")
+        ).strip()
+    }
+
+def v2207_global_tax_profile_status(country, region, filing_status="Single"):
+    p = v2207_tax_profile_get(country, region, filing_status)
+    if p:
+        return "Researched profile ready", p
+    return "Research required", None
+
+
 def v204_region():
     p = profile()
     country = str(p.get("country") or "United States")
@@ -8491,11 +8766,14 @@ def v204_tax_estimate(annual_gross, country, region, filing_status="Single"):
         result["coverage"]="Verified detailed"
         result["note"]="2026 Canada federal + Quebec income tax, QPP, Quebec EI and QPIP planning estimate."
     else:
+        global_profile = v2207_tax_profile_get(country, region, filing_status)
+        if global_profile:
+            return v2207_apply_global_tax_profile(gross, global_profile)
         coverage, coverage_note = v2206_tax_coverage(country, region)
         result["coverage"]=coverage
         result["note"]=(
             f"{country} · {region} is recognized by Sullivan's global tax-region architecture. "
-            f"{coverage_note}. Sullivan will not invent an unverified local tax amount."
+            f"{coverage_note}. Save or refresh this tax region in Settings to build its current tax profile."
         )
     result["total_employee_tax"]=result["federal"]+result["regional"]+result["social"]+result["medicare"]
     result["estimated_net"]=max(0.0,gross-result["total_employee_tax"])
@@ -8506,6 +8784,17 @@ def v204_periods_per_year(frequency):
     return {"Weekly":52,"Biweekly":26,"Semimonthly":24,"Monthly":12,"Annual":1}.get(str(frequency),12)
 
 def v204_tax_breakdown_rows(tax, periods, country, region):
+
+    if tax.get("global_breakdown"):
+        rows=[]
+        for item in tax.get("global_breakdown", []):
+            amount=float(item.get("amount") or 0.0)/max(1,float(periods or 1))
+            rows.append((
+                str(item.get("name") or "Tax / contribution"),
+                amount,
+                "Researched employment-tax component for the selected jurisdiction."
+            ))
+        return rows
     periods=max(1,int(periods or 1))
     if country=="Canada" and region=="Quebec":
         return [
@@ -8944,9 +9233,19 @@ def v204_render_income_payroll():
 
             p1,p2=st.columns(2)
             p1.metric("Gross",f"${ga:,.2f}")
-            p2.metric("Estimated net",f"${preview['net_per_period']:,.2f}")
+            if preview["tax"].get("supported"):
+                p2.metric("Estimated net",f"${preview['net_per_period']:,.2f}")
+            else:
+                p2.metric("Estimated net","Tax profile required")
 
-            if ga>0:
+            if ga>0 and not preview["tax"].get("supported"):
+                st.warning(
+                    f"Sullivan has saved **{region}, {country}**, but this jurisdiction still needs "
+                    "a researched tax profile before Sullivan can give a take-home estimate. "
+                    "Open Settings → Preferences → Tax Region and save/refresh it once."
+                )
+
+            if ga>0 and preview["tax"].get("supported"):
                 difference=max(0.0,ga-preview["net_per_period"])
                 st.markdown(f"### ${ga:,.2f} gross → approximately ${preview['net_per_period']:,.2f} net")
                 st.write(f"Estimated deductions: **${difference:,.2f} per {fr.lower()} pay period**.")
@@ -8978,6 +9277,11 @@ def v204_render_income_payroll():
             ):
                 if not nm.strip() or ga<=0:
                     st.error("Enter an income source and gross amount.")
+                elif not preview["tax"].get("supported"):
+                    st.error(
+                        "Activate this jurisdiction's tax profile in Settings → Preferences → Tax Region "
+                        "before saving the net estimate."
+                    )
                 else:
                     now=datetime.now().isoformat(timespec="seconds")
                     region_label=f"{region}, {country}"
@@ -9024,8 +9328,26 @@ def v204_render_income_payroll():
         )
         if country=="United States" and region=="Virginia":
             st.success("Virginia tax profile is active. Sullivan is using the 2026 U.S. federal rules and Virginia individual rate schedule for planning estimates.")
+        elif tax.get("coverage")=="AI-researched global":
+            st.success(
+                f"Global tax profile active for {region}, {country}. "
+                "Sullivan is using the cached researched profile for this planning estimate."
+            )
+            _srcs = tax.get("global_sources", []) or []
+            if _srcs:
+                with st.expander("Tax research sources"):
+                    for _s in _srcs[:8]:
+                        _title = str(_s.get("title") or "Source")
+                        _url = str(_s.get("url") or "")
+                        if _url.startswith("http"):
+                            st.markdown(f"- [{_title}]({_url})")
+                        else:
+                            st.write(f"- {_title}")
         elif not tax["supported"]:
-            st.warning("This region is saved correctly, but its full local income-tax engine is not enabled yet. Sullivan is intentionally not guessing the missing regional tax.")
+            st.warning(
+                "This tax region is saved, but no researched tax profile is active yet. "
+                "Go to Settings → Preferences → Tax Region and save/refresh the region once."
+            )
 
     if is_company:
         with tabs[2]:
@@ -12067,12 +12389,68 @@ with main_sections[5]:
             )
             _coverage, _coverage_note = v2206_tax_coverage(region_country, region_name)
             st.info(f"Tax-engine coverage: **{_coverage}** · {_coverage_note}.")
+            _v2207_builtin = (
+                (region_country=="Canada" and region_name=="Quebec")
+                or (region_country=="United States" and region_name=="Virginia")
+            )
+            _v2207_status, _v2207_profile = v2207_global_tax_profile_status(
+                region_country, region_name, "Single"
+            ) if not _v2207_builtin else ("Built-in verified profile", None)
+
+            if not _v2207_builtin:
+                if _v2207_profile:
+                    _cur = str(_v2207_profile.get("currency") or "")
+                    st.success(
+                        f"Global tax profile ready for **{region_name}, {region_country}**"
+                        + (f" · currency {_cur}" if _cur else "")
+                    )
+                else:
+                    st.warning(
+                        "This jurisdiction has not been researched yet. Saving it will build a "
+                        "current planning profile using web research, then future calculations are local and fast."
+                    )
+
             if st.button("Save tax region", type="primary", key="v204_save_region"):
                 v204_save_region(region_country, region_name)
-                st.success(f"Tax region saved: {region_name}, {region_country}.")
+                st.session_state["v2207_pending_sidebar_tax_sync"] = {
+                    "country": region_country,
+                    "region": region_name,
+                }
+                if not _v2207_builtin and not _v2207_profile:
+                    if key():
+                        try:
+                            with st.spinner(f"Researching current tax rules for {region_name}, {region_country}…"):
+                                v2207_research_global_tax_profile(region_country, region_name, "Single")
+                            st.success(
+                                f"Tax region saved and global tax profile activated: "
+                                f"{region_name}, {region_country}."
+                            )
+                        except Exception as e:
+                            st.warning(
+                                f"Tax region saved, but Sullivan could not build the tax profile yet: "
+                                f"{type(e).__name__}: {e}"
+                            )
+                    else:
+                        st.warning(
+                            "Tax region saved. Sullivan AI is not configured, so the global tax profile "
+                            "could not be researched yet."
+                        )
+                else:
+                    st.success(f"Tax region saved: {region_name}, {region_country}.")
                 st.rerun()
+
+            if (not _v2207_builtin) and _v2207_profile:
+                if st.button("Refresh global tax profile", key="v2207_refresh_tax_profile"):
+                    try:
+                        with st.spinner(f"Refreshing tax rules for {region_name}, {region_country}…"):
+                            v2207_research_global_tax_profile(region_country, region_name, "Single")
+                        st.success("Global tax profile refreshed.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Could not refresh the tax profile: {type(e).__name__}: {e}")
+
             st.caption(
-                "V22.0.6.1 recognizes ISO countries/territories and available first-level regions globally. "
+                "V22.0.7 recognizes ISO countries/territories and available first-level regions globally. "
                 "Detailed tax calculations are only labeled verified where Sullivan has an explicit jurisdiction model; "
                 "unsupported tax formulas are never silently invented."
             )
