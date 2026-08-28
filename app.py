@@ -17,10 +17,10 @@ import math
 import html
 import time
 
-st.set_page_config(page_title="Sullivan V22.3.3", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V22.3.4", page_icon="S", layout="wide")
 
 # ============================================================
-# V22.3.3 — GLOBAL COUNTRY + TAX-REGION ARCHITECTURE
+# V22.3.4 — GLOBAL COUNTRY + TAX-REGION ARCHITECTURE
 # ISO 3166 country/territory names and first-level subdivisions
 # are embedded so Sullivan does not depend on a runtime web call.
 # ============================================================
@@ -5252,7 +5252,7 @@ v17_init_auth_tables()
 
 # V22.0.2 automatic cloud safety backup.
 v22_autosave_fragment()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.3.3</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.3.4</span></div>",unsafe_allow_html=True)
 
 
 
@@ -6604,7 +6604,7 @@ st.session_state["v19_ui_theme"] = _theme_name
 
 st.markdown("""
 <style>
-/* V22.3.3 — Bank connection control polish */
+/* V22.3.4 — Bank connection control polish */
 
 .sullivan-bank-connect-title {
     display:block !important;
@@ -6623,7 +6623,7 @@ st.markdown("""
 
 st.markdown(r"""
 <style>
-/* V22.3.3: own the visible select chevron instead of relying on BaseWeb's SVG. */
+/* V22.3.4: own the visible select chevron instead of relying on BaseWeb's SVG. */
 div[data-baseweb="select"] > div:first-child {
     position: relative !important;
 }
@@ -6647,7 +6647,7 @@ div[data-baseweb="select"] > div:first-child > div:last-child::after {
 </style>
 """, unsafe_allow_html=True)
 
-# V22.3.3 — force Streamlit/BaseWeb select chevrons to contrast with
+# V22.3.4 — force Streamlit/BaseWeb select chevrons to contrast with
 # Sullivan's actual in-app theme (not the computer/browser theme).
 # `filter` is used because newer Streamlit versions can render the chevron
 # with internal SVG styling that ignores normal fill/color overrides.
@@ -8421,7 +8421,7 @@ def v2043_delete_record_control(table, id_col, label_col, title):
 
 
 # ============================================================
-# V22.3.3 — BANK CONNECTIONS + AUTOMATIC TRANSACTION SYNC
+# V22.3.4 — BANK CONNECTIONS + AUTOMATIC TRANSACTION SYNC
 # Plaid Link + cursor-based Transactions Sync
 # ============================================================
 def v222_plaid_secret(name, default=""):
@@ -8497,7 +8497,7 @@ def v222_bank_tables():
           completed_at TEXT
         );
         """)
-        # V22.3.3 migration: bind each Hosted Link redirect to the exact Link token
+        # V22.3.4 migration: bind each Hosted Link redirect to the exact Link token
         # that created it. This prevents a later Streamlit rerun/new token from
         # stealing the return flow.
         try:
@@ -8959,7 +8959,7 @@ def v223_candidates_for_feed(feed):
                 name_score=v223_similarity(merchant,rtext)
                 date_score=v223_date_score(dt,rdate)
 
-                # V22.3.3: continuous evidence score, not fixed buckets.
+                # V22.3.4: continuous evidence score, not fixed buckets.
                 # Exact amount is already required above, so amount contributes 45%.
                 # Merchant/reference similarity contributes 35%.
                 # Date proximity contributes 20%.
@@ -9017,78 +9017,65 @@ def v223_learned_category_for(merchant):
         c.close()
 
 def v223_category_suggestion(feed):
-    """Calculate a category evidence score from independent measurable signals."""
+    """Continuous evidence score from this transaction + learned Sullivan history."""
     merchant=feed.get("merchant_name") or feed.get("name") or ""
+    description=feed.get("name") or ""
     detailed=feed.get("category_detailed")
     primary=feed.get("category_primary")
     learned=v223_learned_category_for(merchant)
 
-    # Signal 1: Plaid category specificity.
-    # No category=0, primary only=.45, detailed=.70.
-    specificity = 0.0
-    if detailed:
-        specificity = 0.70
-    elif primary:
-        specificity = 0.45
+    detail_tokens=[t for t in v223_norm(detailed).split() if t]
+    primary_tokens=[t for t in v223_norm(primary).split() if t]
+    specificity=(min(1.0,0.42+0.08*len(detail_tokens)) if detailed
+                 else min(0.62,0.28+0.07*len(primary_tokens)) if primary else 0.0)
 
-    # Signal 2: consistency between Plaid primary and detailed taxonomy.
-    taxonomy_consistency = 0.0
     if primary and detailed:
-        p=v223_norm(primary)
-        d=v223_norm(detailed)
-        taxonomy_consistency = 1.0 if p and (p in d or d.startswith(p)) else 0.65
-    elif primary or detailed:
-        taxonomy_consistency = 0.35
+        p=set(primary_tokens); d=set(detail_tokens)
+        overlap=len(p & d)/max(1,len(p))
+        taxonomy=0.45+0.55*overlap
+    else:
+        taxonomy=0.25 if (primary or detailed) else 0.0
 
-    # Signal 3: merchant cleanliness/identity. A real merchant name is stronger than
-    # a generic transaction description such as "POS DEBIT" or "TRANSFER".
-    merchant_n=v223_norm(merchant)
-    generic_terms={"transfer","payment","purchase","debit","credit","transaction","online","pos","ach"}
-    tokens=[t for t in merchant_n.split() if t]
-    informative=[t for t in tokens if t not in generic_terms and len(t)>=3]
-    merchant_signal=min(1.0, len(informative)/3.0) if informative else 0.0
+    generic={"transfer","payment","purchase","debit","credit","transaction","online","pos","ach","card"}
+    mt=[x for x in v223_norm(merchant).split() if len(x)>=3 and x not in generic]
+    dt=[x for x in v223_norm(description).split() if len(x)>=3 and x not in generic]
+    merchant_signal=min(1.0,len(mt)/4.0)
+    description_signal=min(1.0,len(dt)/5.0)
 
-    # Signal 4: Sullivan learned history. This is the strongest categorization evidence.
-    learned_signal=0.0
-    learned_category=None
-    learned_similarity=0.0
-    if learned:
-        learned_category=learned["category"]
-        learned_similarity=float(learned["merchant_similarity"])
-        learned_signal=learned_similarity
+    # Merchant/description agreement varies continuously per transaction.
+    identity_signal=v223_similarity(merchant,description) if merchant and description else 0.0
 
-    # Weighted continuous calculation. These are evidence weights, not a fake
-    # statistical probability model.
-    evidence = (
-        0.30 * specificity +
-        0.15 * taxonomy_consistency +
-        0.15 * merchant_signal +
-        0.40 * learned_signal
+    # Small amount-behavior signal; never decisive by itself.
+    amt=v223_money(feed.get("amount"))
+    amount_signal=max(0.0,min(1.0,1.0/(1.0+abs(amt-120.0)/350.0))) if amt else 0.0
+
+    learned_signal=float(learned["merchant_similarity"]) if learned else 0.0
+
+    evidence=(
+        0.18*specificity +
+        0.10*taxonomy +
+        0.12*merchant_signal +
+        0.08*description_signal +
+        0.12*identity_signal +
+        0.05*amount_signal +
+        0.35*learned_signal
     )
 
-    # If there is no learned history yet, Plaid can still provide a useful category,
-    # but the score stays appropriately moderate rather than pretending to be 86%.
-    if learned_category:
-        category=learned_category
-        source="Sullivan history + Plaid"
+    if learned:
+        category=learned["category"]; source="Sullivan history + Plaid"
     elif detailed:
-        category=str(detailed).replace("_"," ").title()
-        source="Plaid detailed category"
+        category=str(detailed).replace("_"," ").title(); source="Plaid detailed category"
     elif primary:
-        category=str(primary).replace("_"," ").title()
-        source="Plaid primary category"
+        category=str(primary).replace("_"," ").title(); source="Plaid primary category"
     else:
         return None
 
     return {
-        "category":category,
-        "confidence":min(max(evidence,0.0),0.99),
-        "source":source,
-        "specificity":specificity,
-        "taxonomy_consistency":taxonomy_consistency,
-        "merchant_signal":merchant_signal,
-        "learned_signal":learned_signal,
-        "learned_similarity":learned_similarity,
+        "category":category,"confidence":min(max(evidence,0.0),0.99),"source":source,
+        "specificity":specificity,"taxonomy_consistency":taxonomy,
+        "merchant_signal":merchant_signal,"description_signal":description_signal,
+        "identity_signal":identity_signal,"amount_signal":amount_signal,
+        "learned_signal":learned_signal
     }
 
 def v223_analyze_feed():
@@ -9127,10 +9114,13 @@ def v223_analyze_feed():
             if sugg:
                 note=(
                     f'Category suggestion: {sugg["category"]} · {sugg["source"]} · '
-                    f'calculation: specificity {sugg["specificity"]:.0%} ×30% + '
-                    f'taxonomy {sugg["taxonomy_consistency"]:.0%} ×15% + '
-                    f'merchant {sugg["merchant_signal"]:.0%} ×15% + '
-                    f'learned history {sugg["learned_signal"]:.0%} ×40%'
+                    f'calculation: specificity {sugg["specificity"]:.0%} ×18% + '
+                    f'taxonomy {sugg["taxonomy_consistency"]:.0%} ×10% + '
+                    f'merchant {sugg["merchant_signal"]:.0%} ×12% + '
+                    f'description {sugg["description_signal"]:.0%} ×8% + '
+                    f'identity {sugg["identity_signal"]:.0%} ×12% + '
+                    f'amount behavior {sugg["amount_signal"]:.0%} ×5% + '
+                    f'learned history {sugg["learned_signal"]:.0%} ×35%'
                 )
                 updates.append(("category",None,sugg["confidence"],note,f["id"]))
             else:
@@ -9339,7 +9329,7 @@ def v222_render_bank_connections():
     if not ac.empty:st.markdown("#### Accounts");st.dataframe(ac,use_container_width=True,hide_index=True)
     fd=v222_feed()
     if not fd.empty:st.markdown("#### Latest bank activity");st.dataframe(fd,use_container_width=True,hide_index=True)
-    st.caption("Bank-feed transactions stay separate from the ledger in V22.3.3, preventing accidental duplicate posting.")
+    st.caption("Bank-feed transactions stay separate from the ledger in V22.3.4, preventing accidental duplicate posting.")
     st.divider()
     v223_render_reconciliation()
 
@@ -9364,7 +9354,7 @@ V204_CANADA_REGIONS = [
 
 
 # ============================================================
-# V22.3.3 — LIVE GLOBAL TAX PROFILE ENGINE
+# V22.3.4 — LIVE GLOBAL TAX PROFILE ENGINE
 # ============================================================
 # Built-in verified engines remain authoritative for Quebec and Virginia.
 # Other jurisdictions can be researched once with OpenAI web search, cached
@@ -12902,15 +12892,28 @@ with main_sections[0]:
 
 # PERSONAL
 with main_sections[1]:
-    personal_tabs=st.tabs(["Overview","Income & Taxes","Budgeting","Debt, Goals & Retirement"])
-    with personal_tabs[0]:
-        v212_personal_overview()
-    with personal_tabs[1]:
-        v204_render_income_payroll()
-    with personal_tabs[2]:
-        v21_render_budgeting()
-    with personal_tabs[3]:
-        v212_personal_planning()
+    if current_company() is None:
+        personal_tabs=st.tabs(["Overview","Income & Taxes","Budgeting","Banking","Debt, Goals & Retirement"])
+        with personal_tabs[0]:
+            v212_personal_overview()
+        with personal_tabs[1]:
+            v204_render_income_payroll()
+        with personal_tabs[2]:
+            v21_render_budgeting()
+        with personal_tabs[3]:
+            v222_render_bank_connections()
+        with personal_tabs[4]:
+            v212_personal_planning()
+    else:
+        personal_tabs=st.tabs(["Overview","Income & Taxes","Budgeting","Debt, Goals & Retirement"])
+        with personal_tabs[0]:
+            v212_personal_overview()
+        with personal_tabs[1]:
+            v204_render_income_payroll()
+        with personal_tabs[2]:
+            v21_render_budgeting()
+        with personal_tabs[3]:
+            v212_personal_planning()
 
 # BUSINESS
 with main_sections[2]:
@@ -12931,6 +12934,10 @@ with main_sections[2]:
     with business_tabs[3]:
         expense_tabs=st.tabs(["Vendors","Purchase Orders","Bills","Documents"])
     with business_tabs[4]:
+        if current_company() is not None:
+            v222_render_bank_connections()
+        else:
+            st.info("Switch to a Company workspace to connect and manage business bank accounts.")
         banking_tabs=st.tabs(["Bank Activity","Reconciliation"])
     with business_tabs[5]:
         tax_tabs=st.tabs(["Tax Center"])
@@ -13332,9 +13339,6 @@ with main_sections[5]:
                 except Exception as e:
                     st.error(str(e))
 
-            v222_render_bank_connections()
-            st.divider()
-
             st.markdown("### Tax region")
             st.caption(
                 "Sullivan uses the active workspace's country and state/province for payroll, income, tax estimates, and future tax-aware planning."
@@ -13416,7 +13420,7 @@ with main_sections[5]:
                         st.error(f"Could not refresh the tax profile: {type(e).__name__}: {e}")
 
             st.caption(
-                "V22.3.3 recognizes ISO countries/territories and available first-level regions globally. "
+                "V22.3.4 recognizes ISO countries/territories and available first-level regions globally. "
                 "Detailed tax calculations are only labeled verified where Sullivan has an explicit jurisdiction model; "
                 "unsupported tax formulas are never silently invented."
             )
