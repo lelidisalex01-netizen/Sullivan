@@ -17,10 +17,10 @@ import math
 import html
 import time
 
-st.set_page_config(page_title="Sullivan V22.3", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V22.3.1", page_icon="S", layout="wide")
 
 # ============================================================
-# V22.3 — GLOBAL COUNTRY + TAX-REGION ARCHITECTURE
+# V22.3.1 — GLOBAL COUNTRY + TAX-REGION ARCHITECTURE
 # ISO 3166 country/territory names and first-level subdivisions
 # are embedded so Sullivan does not depend on a runtime web call.
 # ============================================================
@@ -5252,7 +5252,7 @@ v17_init_auth_tables()
 
 # V22.0.2 automatic cloud safety backup.
 v22_autosave_fragment()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.3</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.3.1</span></div>",unsafe_allow_html=True)
 
 
 
@@ -6604,7 +6604,7 @@ st.session_state["v19_ui_theme"] = _theme_name
 
 st.markdown("""
 <style>
-/* V22.3 — Bank connection control polish */
+/* V22.3.1 — Bank connection control polish */
 
 .sullivan-bank-connect-title {
     display:block !important;
@@ -6623,7 +6623,7 @@ st.markdown("""
 
 st.markdown(r"""
 <style>
-/* V22.3: own the visible select chevron instead of relying on BaseWeb's SVG. */
+/* V22.3.1: own the visible select chevron instead of relying on BaseWeb's SVG. */
 div[data-baseweb="select"] > div:first-child {
     position: relative !important;
 }
@@ -6647,7 +6647,7 @@ div[data-baseweb="select"] > div:first-child > div:last-child::after {
 </style>
 """, unsafe_allow_html=True)
 
-# V22.3 — force Streamlit/BaseWeb select chevrons to contrast with
+# V22.3.1 — force Streamlit/BaseWeb select chevrons to contrast with
 # Sullivan's actual in-app theme (not the computer/browser theme).
 # `filter` is used because newer Streamlit versions can render the chevron
 # with internal SVG styling that ignores normal fill/color overrides.
@@ -8421,7 +8421,7 @@ def v2043_delete_record_control(table, id_col, label_col, title):
 
 
 # ============================================================
-# V22.3 — BANK CONNECTIONS + AUTOMATIC TRANSACTION SYNC
+# V22.3.1 — BANK CONNECTIONS + AUTOMATIC TRANSACTION SYNC
 # Plaid Link + cursor-based Transactions Sync
 # ============================================================
 def v222_plaid_secret(name, default=""):
@@ -8497,7 +8497,7 @@ def v222_bank_tables():
           completed_at TEXT
         );
         """)
-        # V22.3 migration: bind each Hosted Link redirect to the exact Link token
+        # V22.3.1 migration: bind each Hosted Link redirect to the exact Link token
         # that created it. This prevents a later Streamlit rerun/new token from
         # stealing the return flow.
         try:
@@ -8958,13 +8958,28 @@ def v223_candidates_for_feed(feed):
                 rdate=v223_pick(r,datenames)
                 name_score=v223_similarity(merchant,rtext)
                 date_score=v223_date_score(dt,rdate)
-                # Exact amount is required; merchant/date determine confidence.
-                score=0.62 + 0.23*name_score + 0.15*date_score
-                candidates.append({
-                    "kind":kind,"target_id":int(rid),"score":min(score,0.99),
-                    "label":str(rtext or f"{kind} #{rid}"),
-                    "date":str(rdate or ""),"amount":ramt
-                })
+
+                # Confidence is intentionally conservative:
+                # exact amount alone is not enough to call something a good match.
+                # Merchant/reference similarity is the strongest signal, date is secondary.
+                if name_score >= 0.90 and date_score >= 0.70:
+                    score = 0.97
+                elif name_score >= 0.78 and date_score >= 0.45:
+                    score = 0.91
+                elif name_score >= 0.62 and date_score >= 0.25:
+                    score = 0.82
+                elif name_score >= 0.45 and date_score > 0:
+                    score = 0.70
+                else:
+                    score = 0.0
+
+                # Do not surface weak exact-dollar coincidences as "matches".
+                if score > 0:
+                    candidates.append({
+                        "kind":kind,"target_id":int(rid),"score":score,
+                        "label":str(rtext or f"{kind} #{rid}"),
+                        "date":str(rdate or ""),"amount":ramt
+                    })
 
         candidates.sort(key=lambda x:x["score"],reverse=True)
         return candidates[:5]
@@ -8999,7 +9014,9 @@ def v223_analyze_feed():
             updates.append((top["kind"],top["target_id"],top["score"],note,f["id"]))
         else:
             cat=f.get("category_detailed") or f.get("category_primary") or "Uncategorized"
-            updates.append(("category",None,0.45,f"Suggested category: {cat}",f["id"]))
+            # Plaid's category is useful context, but it is NOT a reconciliation match.
+            # Never present an arbitrary pseudo-confidence such as 45%.
+            updates.append(("category",None,None,f"Needs review · Plaid category: {cat}",f["id"]))
 
     c=connect()
     try:
@@ -9065,7 +9082,7 @@ def v223_reset(feed_id):
 
 def v223_render_reconciliation():
     st.markdown("### Smart reconciliation")
-    st.caption("Sullivan compares posted bank activity with your invoices, bills, payments and ledger. Nothing is posted automatically.")
+    st.caption("Sullivan only shows a percentage when it finds a real accounting match. Plaid category suggestions are labeled Needs review instead of receiving a fake confidence score. Nothing is posted automatically.")
     rows=v223_feed_rows()
     if not rows:
         st.info("Connect and sync a bank to start reconciliation.")
@@ -9076,6 +9093,7 @@ def v223_render_reconciliation():
     b.metric("Matched",sum(1 for r in rows if r["ledger_status"]=="matched"))
     c.metric("Pending",sum(1 for r in rows if r["pending"]))
     d.metric("Ignored",sum(1 for r in rows if r["ledger_status"]=="ignored"))
+    st.caption("Confidence guide: 90–99% strong · 80–89% good · 70–79% possible · no percentage = Sullivan does not have enough evidence to claim a match.")
 
     if st.button("Analyze unmatched transactions",key="v223_analyze",type="primary",use_container_width=True):
         with st.spinner("Comparing bank activity with Sullivan records…"):
@@ -9099,19 +9117,33 @@ def v223_render_reconciliation():
                 st.markdown(f"**{amount:,.2f} {cur}**")
                 st.caption("Pending" if r["pending"] else str(r["ledger_status"]).title())
             with c3:
-                conf=float(r["reconciliation_confidence"] or 0)
-                if conf:st.markdown(f"**{conf:.0%} confidence**")
+                raw_conf=r["reconciliation_confidence"]
+                if raw_conf is not None:
+                    conf=float(raw_conf)
+                    if conf >= 0.90:
+                        st.markdown(f"**{conf:.0%} · Strong match**")
+                    elif conf >= 0.80:
+                        st.markdown(f"**{conf:.0%} · Good match**")
+                    elif conf >= 0.70:
+                        st.markdown(f"**{conf:.0%} · Possible match**")
+                elif r["reconciliation_type"]=="category":
+                    st.markdown("**Needs review**")
 
             if r["reconciliation_note"]:
-                st.info(r["reconciliation_note"])
+                if r["reconciliation_type"]=="category":
+                    st.warning(r["reconciliation_note"])
+                else:
+                    st.info(r["reconciliation_note"])
 
             if r["ledger_status"]=="new" and not r["pending"]:
                 typ=r["reconciliation_type"]
                 target=r["reconciliation_target_id"]
                 x,y,z=st.columns(3)
                 with x:
-                    if target and typ not in ("category","pending"):
-                        if st.button("Accept match",key=f'v223_accept_{r["id"]}',use_container_width=True):
+                    conf=float(r["reconciliation_confidence"] or 0)
+                    if target and typ not in ("category","pending") and conf >= 0.70:
+                        label="Accept match" if conf >= 0.80 else "Review & accept"
+                        if st.button(label,key=f'v223_accept_{r["id"]}',use_container_width=True):
                             v223_mark_match(r["id"]);st.rerun()
                 with y:
                     if st.button("Ignore",key=f'v223_ignore_{r["id"]}',use_container_width=True):
@@ -9182,7 +9214,7 @@ def v222_render_bank_connections():
     if not ac.empty:st.markdown("#### Accounts");st.dataframe(ac,use_container_width=True,hide_index=True)
     fd=v222_feed()
     if not fd.empty:st.markdown("#### Latest bank activity");st.dataframe(fd,use_container_width=True,hide_index=True)
-    st.caption("Bank-feed transactions stay separate from the ledger in V22.3, preventing accidental duplicate posting.")
+    st.caption("Bank-feed transactions stay separate from the ledger in V22.3.1, preventing accidental duplicate posting.")
     st.divider()
     v223_render_reconciliation()
 
@@ -9207,7 +9239,7 @@ V204_CANADA_REGIONS = [
 
 
 # ============================================================
-# V22.3 — LIVE GLOBAL TAX PROFILE ENGINE
+# V22.3.1 — LIVE GLOBAL TAX PROFILE ENGINE
 # ============================================================
 # Built-in verified engines remain authoritative for Quebec and Virginia.
 # Other jurisdictions can be researched once with OpenAI web search, cached
@@ -13259,7 +13291,7 @@ with main_sections[5]:
                         st.error(f"Could not refresh the tax profile: {type(e).__name__}: {e}")
 
             st.caption(
-                "V22.3 recognizes ISO countries/territories and available first-level regions globally. "
+                "V22.3.1 recognizes ISO countries/territories and available first-level regions globally. "
                 "Detailed tax calculations are only labeled verified where Sullivan has an explicit jurisdiction model; "
                 "unsupported tax formulas are never silently invented."
             )
