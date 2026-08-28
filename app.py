@@ -16,10 +16,10 @@ import math
 import html
 import time
 
-st.set_page_config(page_title="Sullivan V22.0.7", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V22.2", page_icon="S", layout="wide")
 
 # ============================================================
-# V22.0.7 — GLOBAL COUNTRY + TAX-REGION ARCHITECTURE
+# V22.2 — GLOBAL COUNTRY + TAX-REGION ARCHITECTURE
 # ISO 3166 country/territory names and first-level subdivisions
 # are embedded so Sullivan does not depend on a runtime web call.
 # ============================================================
@@ -371,6 +371,9 @@ SHARED_SULLIVAN_TABLES = (
     "ai_demo_results",
     "enterprise_quotes",
     "workspace_migrations",
+    "bank_connections",
+    "bank_accounts",
+    "bank_feed_transactions",
 )
 
 
@@ -5248,7 +5251,7 @@ v17_init_auth_tables()
 
 # V22.0.2 automatic cloud safety backup.
 v22_autosave_fragment()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.0.7</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.2</span></div>",unsafe_allow_html=True)
 
 
 
@@ -6599,7 +6602,7 @@ st.session_state["v19_ui_theme"] = _theme_name
 
 st.markdown(r"""
 <style>
-/* V22.0.7: own the visible select chevron instead of relying on BaseWeb's SVG. */
+/* V22.2: own the visible select chevron instead of relying on BaseWeb's SVG. */
 div[data-baseweb="select"] > div:first-child {
     position: relative !important;
 }
@@ -6623,7 +6626,7 @@ div[data-baseweb="select"] > div:first-child > div:last-child::after {
 </style>
 """, unsafe_allow_html=True)
 
-# V22.0.7 — force Streamlit/BaseWeb select chevrons to contrast with
+# V22.2 — force Streamlit/BaseWeb select chevrons to contrast with
 # Sullivan's actual in-app theme (not the computer/browser theme).
 # `filter` is used because newer Streamlit versions can render the chevron
 # with internal SVG styling that ignores normal fill/color overrides.
@@ -8381,6 +8384,252 @@ def v2043_delete_record_control(table, id_col, label_col, title):
                 st.rerun()
 
 
+
+# ============================================================
+# V22.2 — BANK CONNECTIONS + AUTOMATIC TRANSACTION SYNC
+# Plaid Link + cursor-based Transactions Sync
+# ============================================================
+def v222_plaid_secret(name, default=""):
+    try:
+        sec=st.secrets.get("plaid",{})
+        if sec and sec.get(name): return str(sec.get(name))
+    except Exception: pass
+    keys={"client_id":["PLAID_CLIENT_ID"],"secret":["PLAID_SECRET"],
+          "environment":["PLAID_ENVIRONMENT","PLAID_ENV"]}.get(name,[name])
+    for k in keys:
+        try:
+            if st.secrets.get(k): return str(st.secrets.get(k))
+        except Exception: pass
+        if os.getenv(k): return str(os.getenv(k))
+    return default
+
+def v222_plaid_base():
+    e=v222_plaid_secret("environment","sandbox").lower()
+    if e in ("production","prod"): return "https://production.plaid.com","production"
+    if e in ("development","dev"): return "https://development.plaid.com","development"
+    return "https://sandbox.plaid.com","sandbox"
+
+def v222_plaid_ready():
+    return bool(v222_plaid_secret("client_id") and v222_plaid_secret("secret"))
+
+def v222_plaid_post(endpoint,payload,timeout=45):
+    base,_=v222_plaid_base()
+    body=dict(payload or {})
+    body.update(client_id=v222_plaid_secret("client_id"),secret=v222_plaid_secret("secret"))
+    r=requests.post(base+endpoint,json=body,timeout=timeout)
+    try: data=r.json()
+    except Exception: data={"error_message":r.text[:500]}
+    if not r.ok:
+        raise RuntimeError(data.get("error_message") or data.get("error_code") or f"Plaid HTTP {r.status_code}")
+    return data
+
+def v222_bank_tables():
+    c=connect()
+    try:
+        c.executescript("""
+        CREATE TABLE IF NOT EXISTS bank_connections(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_key TEXT NOT NULL,
+          provider TEXT NOT NULL DEFAULT 'plaid', item_id TEXT NOT NULL,
+          access_token TEXT NOT NULL, institution_id TEXT, institution_name TEXT,
+          cursor TEXT, status TEXT DEFAULT 'active', last_sync_at TEXT, created_at TEXT,
+          UNIQUE(workspace_key,provider,item_id));
+        CREATE TABLE IF NOT EXISTS bank_accounts(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_key TEXT NOT NULL,
+          provider TEXT NOT NULL DEFAULT 'plaid', item_id TEXT NOT NULL,
+          account_id TEXT NOT NULL, name TEXT, official_name TEXT, mask TEXT,
+          account_type TEXT, subtype TEXT, currency TEXT,current_balance REAL,
+          available_balance REAL, active INTEGER DEFAULT 1,
+          UNIQUE(workspace_key,provider,account_id));
+        CREATE TABLE IF NOT EXISTS bank_feed_transactions(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_key TEXT NOT NULL,
+          provider TEXT NOT NULL DEFAULT 'plaid', transaction_id TEXT NOT NULL,
+          item_id TEXT NOT NULL, account_id TEXT, posted_date TEXT, authorized_date TEXT,
+          name TEXT, merchant_name TEXT, amount REAL, currency TEXT,pending INTEGER DEFAULT 0,
+          category_primary TEXT, category_detailed TEXT, raw_json TEXT,
+          ledger_status TEXT DEFAULT 'new', ledger_transaction_id INTEGER, updated_at TEXT,
+          UNIQUE(workspace_key,provider,transaction_id));
+        """)
+        c.commit()
+    finally: c.close()
+
+def v222_wk(): return str(_workspace_storage_key() or "default")
+
+V222_COUNTRIES=["US","CA","GB","ES","NL","FR","IE","DE","IT","PL","DK","NO","SE","EE","LT","LV","PT","BE","AT","FI"]
+
+def v222_link_countries():
+    try:
+        country,_=v204_region(); code=v2206_country_code(country)
+        return [code] if code in V222_COUNTRIES else ["US","CA"]
+    except Exception: return ["US","CA"]
+
+def v222_create_link_token():
+    uid=hashlib.sha256(("sullivan:"+v222_wk()).encode()).hexdigest()[:48]
+    data=v222_plaid_post("/link/token/create",{
+      "user":{"client_user_id":uid},"client_name":"Sullivan",
+      "products":["transactions"],"country_codes":v222_link_countries(),"language":"en"})
+    return data.get("link_token")
+
+def v222_exchange(public_token,inst_id="",inst_name=""):
+    d=v222_plaid_post("/item/public_token/exchange",{"public_token":public_token})
+    token,item=d.get("access_token"),d.get("item_id")
+    if not token or not item: raise RuntimeError("Plaid token exchange was incomplete.")
+    now=datetime.now().isoformat(timespec="seconds")
+    def fn(c):
+        c.execute("""INSERT INTO bank_connections(workspace_key,provider,item_id,access_token,
+        institution_id,institution_name,status,created_at) VALUES(?,?,?,?,?,?,?,?)
+        ON CONFLICT(workspace_key,provider,item_id) DO UPDATE SET access_token=excluded.access_token,
+        institution_id=excluded.institution_id,institution_name=excluded.institution_name,status='active'""",
+        (v222_wk(),"plaid",item,token,inst_id,inst_name,"active",now))
+    write(fn); return item
+
+def v222_connection_rows():
+    v222_bank_tables(); c=connect()
+    try:
+        rows=c.execute("""SELECT item_id,access_token,cursor,institution_name,last_sync_at
+        FROM bank_connections WHERE workspace_key=? AND provider='plaid' AND status='active'""",(v222_wk(),)).fetchall()
+        return [dict(zip(["item_id","access_token","cursor","institution_name","last_sync_at"],r)) for r in rows]
+    finally:c.close()
+
+def v222_refresh_accounts(conn):
+    d=v222_plaid_post("/accounts/get",{"access_token":conn["access_token"]})
+    def fn(c):
+        for a in d.get("accounts",[]) or []:
+            b=a.get("balances") or {}
+            c.execute("""INSERT INTO bank_accounts(workspace_key,provider,item_id,account_id,name,
+            official_name,mask,account_type,subtype,currency,current_balance,available_balance,active)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1)
+            ON CONFLICT(workspace_key,provider,account_id) DO UPDATE SET name=excluded.name,
+            official_name=excluded.official_name,mask=excluded.mask,account_type=excluded.account_type,
+            subtype=excluded.subtype,currency=excluded.currency,current_balance=excluded.current_balance,
+            available_balance=excluded.available_balance,active=1""",
+            (v222_wk(),"plaid",conn["item_id"],a.get("account_id"),a.get("name"),a.get("official_name"),
+             a.get("mask"),a.get("type"),a.get("subtype"),b.get("iso_currency_code") or b.get("unofficial_currency_code"),
+             b.get("current"),b.get("available")))
+    write(fn)
+
+def v222_sync_one(conn):
+    original=conn.get("cursor") or ""; cursor=original
+    added=[];modified=[];removed=[];restarts=0
+    while True:
+        try:
+            d=v222_plaid_post("/transactions/sync",
+                {"access_token":conn["access_token"],"cursor":cursor,"count":500})
+        except RuntimeError as e:
+            if "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION" in str(e) and restarts<2:
+                cursor=original;added=[];modified=[];removed=[];restarts+=1;continue
+            raise
+        added+=d.get("added",[]) or [];modified+=d.get("modified",[]) or [];removed+=d.get("removed",[]) or []
+        cursor=d.get("next_cursor") or cursor
+        if not d.get("has_more"): break
+    now=datetime.now().isoformat(timespec="seconds")
+    def fn(c):
+        for t in added+modified:
+            p=t.get("personal_finance_category") or {}
+            c.execute("""INSERT INTO bank_feed_transactions(workspace_key,provider,transaction_id,item_id,
+            account_id,posted_date,authorized_date,name,merchant_name,amount,currency,pending,
+            category_primary,category_detailed,raw_json,ledger_status,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(workspace_key,provider,transaction_id) DO UPDATE SET posted_date=excluded.posted_date,
+            name=excluded.name,merchant_name=excluded.merchant_name,amount=excluded.amount,
+            pending=excluded.pending,category_primary=excluded.category_primary,
+            category_detailed=excluded.category_detailed,raw_json=excluded.raw_json,updated_at=excluded.updated_at""",
+            (v222_wk(),"plaid",t.get("transaction_id"),conn["item_id"],t.get("account_id"),t.get("date"),
+             t.get("authorized_date"),t.get("name"),t.get("merchant_name"),t.get("amount"),
+             t.get("iso_currency_code") or t.get("unofficial_currency_code"),1 if t.get("pending") else 0,
+             p.get("primary"),p.get("detailed"),json.dumps(t,ensure_ascii=False),"new",now))
+        for r in removed:
+            if r.get("transaction_id"):
+                c.execute("DELETE FROM bank_feed_transactions WHERE workspace_key=? AND transaction_id=?",
+                          (v222_wk(),r["transaction_id"]))
+        c.execute("UPDATE bank_connections SET cursor=?,last_sync_at=? WHERE workspace_key=? AND item_id=?",
+                  (cursor,now,v222_wk(),conn["item_id"]))
+    write(fn);v222_refresh_accounts(conn)
+    return len(added),len(modified),len(removed)
+
+def v222_sync_all():
+    total=[0,0,0]
+    for conn in v222_connection_rows():
+        r=v222_sync_one(conn)
+        total=[total[j]+r[j] for j in range(3)]
+    return tuple(total)
+
+def v222_feed():
+    v222_bank_tables();c=connect()
+    try:return pd.read_sql_query("""SELECT posted_date,COALESCE(merchant_name,name) Description,
+    amount,currency,pending,category_primary Category,ledger_status FROM bank_feed_transactions
+    WHERE workspace_key=? ORDER BY posted_date DESC,id DESC LIMIT 300""",c,params=(v222_wk(),))
+    finally:c.close()
+
+def v222_accounts_df():
+    v222_bank_tables();c=connect()
+    try:return pd.read_sql_query("""SELECT name Account,mask "Last 4",account_type Type,subtype Subtype,
+    currency Currency,current_balance "Current balance",available_balance "Available balance"
+    FROM bank_accounts WHERE workspace_key=? AND active=1 ORDER BY name""",c,params=(v222_wk(),))
+    finally:c.close()
+
+def v222_disconnect(conn):
+    try:v222_plaid_post("/item/remove",{"access_token":conn["access_token"]})
+    except Exception:pass
+    def fn(c):
+        c.execute("DELETE FROM bank_feed_transactions WHERE workspace_key=? AND item_id=?",(v222_wk(),conn["item_id"]))
+        c.execute("DELETE FROM bank_accounts WHERE workspace_key=? AND item_id=?",(v222_wk(),conn["item_id"]))
+        c.execute("DELETE FROM bank_connections WHERE workspace_key=? AND item_id=?",(v222_wk(),conn["item_id"]))
+    write(fn)
+
+def v222_link_component(token):
+    tok=json.dumps(token)
+    components.html(f"""<script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
+    <button id="pb" style="width:100%;padding:12px;border:0;border-radius:10px;background:#1677ff;color:white;font-weight:700">Connect a bank</button>
+    <script>const h=Plaid.create({{token:{tok},onSuccess:(p,m)=>{{
+      const u=new URL(window.parent.location.href);u.searchParams.set("plaid_public_token",p);
+      u.searchParams.set("plaid_institution_id",m.institution?m.institution.institution_id:"");
+      u.searchParams.set("plaid_institution_name",m.institution?m.institution.name:"");
+      window.parent.location.href=u.toString();}}}});document.getElementById("pb").onclick=()=>h.open();</script>""",height=58)
+
+def v222_handle_return():
+    token=st.query_params.get("plaid_public_token")
+    if not token:return
+    try:
+        with st.spinner("Finishing secure bank connection…"):
+            item=v222_exchange(token,st.query_params.get("plaid_institution_id",""),
+                               st.query_params.get("plaid_institution_name",""))
+            conn=next(x for x in v222_connection_rows() if x["item_id"]==item)
+            v222_sync_one(conn)
+        for k in ["plaid_public_token","plaid_institution_id","plaid_institution_name"]:
+            try:del st.query_params[k]
+            except Exception:pass
+        st.success("Bank connected successfully.");st.rerun()
+    except Exception as e:st.error(f"Bank connection failed: {type(e).__name__}: {e}")
+
+def v222_render_bank_connections():
+    st.markdown("### Bank connections")
+    st.caption("Connect bank and credit-card accounts to build Sullivan's automatic bank feed.")
+    v222_bank_tables();v222_handle_return()
+    if not v222_plaid_ready():
+        st.info("Plaid setup required: add PLAID_CLIENT_ID, PLAID_SECRET and PLAID_ENVIRONMENT to Streamlit secrets. Start with sandbox.")
+        return
+    _,env=v222_plaid_base();st.caption(f"Plaid environment: **{env.title()}**")
+    conns=v222_connection_rows()
+    if st.button("Sync bank transactions",type="primary",key="v222_sync") if conns else False:
+        try:
+            with st.spinner("Syncing bank changes…"):a,m,r=v222_sync_all()
+            st.success(f"Updated · {a} added · {m} modified · {r} removed.");st.rerun()
+        except Exception as e:st.error(f"Sync failed: {type(e).__name__}: {e}")
+    with st.expander("Connect bank" if conns else "Connect your first bank",expanded=not bool(conns)):
+        try:
+            t=v222_create_link_token()
+            if t:v222_link_component(t)
+        except Exception as e:st.error(f"Could not start Plaid Link: {type(e).__name__}: {e}")
+    for n,conn in enumerate(conns):
+        a,b=st.columns([4,1]);a.write(f"**{conn.get('institution_name') or 'Connected institution'}**  \nLast sync: {conn.get('last_sync_at') or 'Not yet'}")
+        if b.button("Disconnect",key=f"v222_disc_{n}"):v222_disconnect(conn);st.rerun()
+    ac=v222_accounts_df()
+    if not ac.empty:st.markdown("#### Accounts");st.dataframe(ac,use_container_width=True,hide_index=True)
+    fd=v222_feed()
+    if not fd.empty:st.markdown("#### Latest bank activity");st.dataframe(fd,use_container_width=True,hide_index=True)
+    st.caption("Bank-feed transactions stay separate from the ledger in V22.2, preventing accidental duplicate posting.")
+
+
 # ============================================================
 # V20.4 — REGION, INCOME & PAYROLL
 # ============================================================
@@ -8401,7 +8650,7 @@ V204_CANADA_REGIONS = [
 
 
 # ============================================================
-# V22.0.7 — LIVE GLOBAL TAX PROFILE ENGINE
+# V22.2 — LIVE GLOBAL TAX PROFILE ENGINE
 # ============================================================
 # Built-in verified engines remain authoritative for Quebec and Virginia.
 # Other jurisdictions can be researched once with OpenAI web search, cached
@@ -12369,6 +12618,9 @@ with main_sections[5]:
                 except Exception as e:
                     st.error(str(e))
 
+            v222_render_bank_connections()
+            st.divider()
+
             st.markdown("### Tax region")
             st.caption(
                 "Sullivan uses the active workspace's country and state/province for payroll, income, tax estimates, and future tax-aware planning."
@@ -12450,7 +12702,7 @@ with main_sections[5]:
                         st.error(f"Could not refresh the tax profile: {type(e).__name__}: {e}")
 
             st.caption(
-                "V22.0.7 recognizes ISO countries/territories and available first-level regions globally. "
+                "V22.2 recognizes ISO countries/territories and available first-level regions globally. "
                 "Detailed tax calculations are only labeled verified where Sullivan has an explicit jurisdiction model; "
                 "unsupported tax formulas are never silently invented."
             )
