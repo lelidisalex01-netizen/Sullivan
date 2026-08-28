@@ -16,10 +16,10 @@ import math
 import html
 import time
 
-st.set_page_config(page_title="Sullivan V22.2", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V22.2.1", page_icon="S", layout="wide")
 
 # ============================================================
-# V22.2 — GLOBAL COUNTRY + TAX-REGION ARCHITECTURE
+# V22.2.1 — GLOBAL COUNTRY + TAX-REGION ARCHITECTURE
 # ISO 3166 country/territory names and first-level subdivisions
 # are embedded so Sullivan does not depend on a runtime web call.
 # ============================================================
@@ -5251,7 +5251,7 @@ v17_init_auth_tables()
 
 # V22.0.2 automatic cloud safety backup.
 v22_autosave_fragment()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.2</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.2.1</span></div>",unsafe_allow_html=True)
 
 
 
@@ -6600,9 +6600,23 @@ _theme_user = current_user()
 _theme_name = get_user_ui_theme(_theme_user["id"]) if _theme_user else "Light"
 st.session_state["v19_ui_theme"] = _theme_name
 
+
+st.markdown("""
+<style>
+/* V22.2.1 — Bank connection control polish */
+div[data-testid="stExpander"] details summary {
+    font-weight: 700 !important;
+}
+div[data-testid="stExpander"] details summary:hover {
+    filter: brightness(1.04);
+}
+</style>
+""", unsafe_allow_html=True)
+
+
 st.markdown(r"""
 <style>
-/* V22.2: own the visible select chevron instead of relying on BaseWeb's SVG. */
+/* V22.2.1: own the visible select chevron instead of relying on BaseWeb's SVG. */
 div[data-baseweb="select"] > div:first-child {
     position: relative !important;
 }
@@ -6626,13 +6640,24 @@ div[data-baseweb="select"] > div:first-child > div:last-child::after {
 </style>
 """, unsafe_allow_html=True)
 
-# V22.2 — force Streamlit/BaseWeb select chevrons to contrast with
+# V22.2.1 — force Streamlit/BaseWeb select chevrons to contrast with
 # Sullivan's actual in-app theme (not the computer/browser theme).
 # `filter` is used because newer Streamlit versions can render the chevron
 # with internal SVG styling that ignores normal fill/color overrides.
 if _theme_name == "Dark":
     st.markdown("""
     <style>
+
+    div[data-testid="stExpander"] details {
+        background:#10243a !important;
+        border:1px solid #28415b !important;
+        border-radius:12px !important;
+    }
+    div[data-testid="stExpander"] details summary,
+    div[data-testid="stExpander"] details summary * {
+        color:#FFFFFF !important;
+        -webkit-text-fill-color:#FFFFFF !important;
+    }
     div[data-baseweb="select"] > div:first-child > div:last-child::after { color:#FFFFFF !important; }
     [data-testid="stSelectbox"] div[data-baseweb="select"] svg,
     [data-testid="stMultiSelect"] div[data-baseweb="select"] svg,
@@ -6657,6 +6682,17 @@ if _theme_name == "Dark":
 else:
     st.markdown("""
     <style>
+
+    div[data-testid="stExpander"] details {
+        background:#FFFFFF !important;
+        border:1px solid #D7E0EA !important;
+        border-radius:12px !important;
+    }
+    div[data-testid="stExpander"] details summary,
+    div[data-testid="stExpander"] details summary * {
+        color:#0B1F33 !important;
+        -webkit-text-fill-color:#0B1F33 !important;
+    }
     div[data-baseweb="select"] > div:first-child > div:last-child::after { color:#111111 !important; }
     [data-testid="stSelectbox"] div[data-baseweb="select"] svg,
     [data-testid="stMultiSelect"] div[data-baseweb="select"] svg,
@@ -8386,7 +8422,7 @@ def v2043_delete_record_control(table, id_col, label_col, title):
 
 
 # ============================================================
-# V22.2 — BANK CONNECTIONS + AUTOMATIC TRANSACTION SYNC
+# V22.2.1 — BANK CONNECTIONS + AUTOMATIC TRANSACTION SYNC
 # Plaid Link + cursor-based Transactions Sync
 # ============================================================
 def v222_plaid_secret(name, default=""):
@@ -8577,14 +8613,104 @@ def v222_disconnect(conn):
     write(fn)
 
 def v222_link_component(token):
+    # Plaid's JS bundle loads asynchronously inside Streamlit's component iframe.
+    # V22.2 initialized Plaid immediately, so clicks could silently do nothing if
+    # the external script had not finished loading. V22.2.1 initializes Link only
+    # from the script's onload callback and shows a real loading/error state.
     tok=json.dumps(token)
-    components.html(f"""<script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
-    <button id="pb" style="width:100%;padding:12px;border:0;border-radius:10px;background:#1677ff;color:white;font-weight:700">Connect a bank</button>
-    <script>const h=Plaid.create({{token:{tok},onSuccess:(p,m)=>{{
-      const u=new URL(window.parent.location.href);u.searchParams.set("plaid_public_token",p);
-      u.searchParams.set("plaid_institution_id",m.institution?m.institution.institution_id:"");
-      u.searchParams.set("plaid_institution_name",m.institution?m.institution.name:"");
-      window.parent.location.href=u.toString();}}}});document.getElementById("pb").onclick=()=>h.open();</script>""",height=58)
+    components.html(f"""
+    <div style="font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+      <button id="pb" disabled
+        style="width:100%;padding:13px 18px;border:1px solid rgba(255,255,255,.14);
+        border-radius:10px;background:#1f7bf4;color:#fff;font-weight:750;font-size:15px;
+        cursor:not-allowed;opacity:.70;transition:.15s ease;">
+        Loading secure bank connection…
+      </button>
+      <div id="pe" style="display:none;margin-top:8px;font-size:12px;color:#ffb4b4;"></div>
+    </div>
+
+    <script>
+      let plaidHandler = null;
+      const btn = document.getElementById("pb");
+      const err = document.getElementById("pe");
+
+      function fail(message) {{
+        btn.disabled = true;
+        btn.textContent = "Bank connection unavailable";
+        btn.style.opacity = ".72";
+        btn.style.cursor = "not-allowed";
+        err.style.display = "block";
+        err.textContent = message;
+      }}
+
+      function initPlaid() {{
+        try {{
+          if (!window.Plaid) {{
+            fail("Plaid Link did not load. Refresh Sullivan and try again.");
+            return;
+          }}
+
+          plaidHandler = window.Plaid.create({{
+            token: {tok},
+            onLoad: function() {{
+              btn.disabled = false;
+              btn.textContent = "Connect a bank";
+              btn.style.opacity = "1";
+              btn.style.cursor = "pointer";
+            }},
+            onSuccess: function(public_token, metadata) {{
+              btn.disabled = true;
+              btn.textContent = "Finishing connection…";
+              const u = new URL(window.parent.location.href);
+              u.searchParams.set("plaid_public_token", public_token);
+              u.searchParams.set(
+                "plaid_institution_id",
+                metadata && metadata.institution ? metadata.institution.institution_id : ""
+              );
+              u.searchParams.set(
+                "plaid_institution_name",
+                metadata && metadata.institution ? metadata.institution.name : ""
+              );
+              window.parent.location.assign(u.toString());
+            }},
+            onExit: function(linkError, metadata) {{
+              btn.disabled = false;
+              btn.textContent = "Connect a bank";
+              btn.style.opacity = "1";
+              btn.style.cursor = "pointer";
+              if (linkError && linkError.display_message) {{
+                err.style.display = "block";
+                err.textContent = linkError.display_message;
+              }}
+            }}
+          }});
+        }} catch (e) {{
+          fail("Could not initialize Plaid Link: " + (e && e.message ? e.message : e));
+        }}
+      }}
+
+      btn.addEventListener("click", function() {{
+        if (!plaidHandler) {{
+          fail("Plaid Link is still loading. Refresh Sullivan and try again.");
+          return;
+        }}
+        try {{
+          plaidHandler.open();
+        }} catch (e) {{
+          fail("Could not open Plaid Link: " + (e && e.message ? e.message : e));
+        }}
+      }});
+
+      const s = document.createElement("script");
+      s.src = "https://cdn.plaid.com/link/v2/stable/link-initialize.js";
+      s.async = true;
+      s.onload = initPlaid;
+      s.onerror = function() {{
+        fail("Plaid Link could not be loaded from cdn.plaid.com.");
+      }};
+      document.head.appendChild(s);
+    </script>
+    """,height=76)
 
 def v222_handle_return():
     token=st.query_params.get("plaid_public_token")
@@ -8627,7 +8753,7 @@ def v222_render_bank_connections():
     if not ac.empty:st.markdown("#### Accounts");st.dataframe(ac,use_container_width=True,hide_index=True)
     fd=v222_feed()
     if not fd.empty:st.markdown("#### Latest bank activity");st.dataframe(fd,use_container_width=True,hide_index=True)
-    st.caption("Bank-feed transactions stay separate from the ledger in V22.2, preventing accidental duplicate posting.")
+    st.caption("Bank-feed transactions stay separate from the ledger in V22.2.1, preventing accidental duplicate posting.")
 
 
 # ============================================================
@@ -8650,7 +8776,7 @@ V204_CANADA_REGIONS = [
 
 
 # ============================================================
-# V22.2 — LIVE GLOBAL TAX PROFILE ENGINE
+# V22.2.1 — LIVE GLOBAL TAX PROFILE ENGINE
 # ============================================================
 # Built-in verified engines remain authoritative for Quebec and Virginia.
 # Other jurisdictions can be researched once with OpenAI web search, cached
@@ -12702,7 +12828,7 @@ with main_sections[5]:
                         st.error(f"Could not refresh the tax profile: {type(e).__name__}: {e}")
 
             st.caption(
-                "V22.2 recognizes ISO countries/territories and available first-level regions globally. "
+                "V22.2.1 recognizes ISO countries/territories and available first-level regions globally. "
                 "Detailed tax calculations are only labeled verified where Sullivan has an explicit jurisdiction model; "
                 "unsupported tax formulas are never silently invented."
             )
