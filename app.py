@@ -16,10 +16,10 @@ import math
 import html
 import time
 
-st.set_page_config(page_title="Sullivan V22.2.1", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V22.2.2", page_icon="S", layout="wide")
 
 # ============================================================
-# V22.2.1 — GLOBAL COUNTRY + TAX-REGION ARCHITECTURE
+# V22.2.2 — GLOBAL COUNTRY + TAX-REGION ARCHITECTURE
 # ISO 3166 country/territory names and first-level subdivisions
 # are embedded so Sullivan does not depend on a runtime web call.
 # ============================================================
@@ -5251,7 +5251,7 @@ v17_init_auth_tables()
 
 # V22.0.2 automatic cloud safety backup.
 v22_autosave_fragment()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.2.1</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.2.2</span></div>",unsafe_allow_html=True)
 
 
 
@@ -6603,7 +6603,19 @@ st.session_state["v19_ui_theme"] = _theme_name
 
 st.markdown("""
 <style>
-/* V22.2.1 — Bank connection control polish */
+/* V22.2.2 — Bank connection control polish */
+
+.sullivan-bank-connect-title {
+    display:block !important;
+    width:100% !important;
+    box-sizing:border-box !important;
+    margin:14px 0 8px 0 !important;
+    padding:13px 16px !important;
+    border-radius:10px !important;
+    font-size:15px !important;
+    font-weight:750 !important;
+    line-height:1.25 !important;
+}
 div[data-testid="stExpander"] details summary {
     font-weight: 700 !important;
 }
@@ -6616,7 +6628,7 @@ div[data-testid="stExpander"] details summary:hover {
 
 st.markdown(r"""
 <style>
-/* V22.2.1: own the visible select chevron instead of relying on BaseWeb's SVG. */
+/* V22.2.2: own the visible select chevron instead of relying on BaseWeb's SVG. */
 div[data-baseweb="select"] > div:first-child {
     position: relative !important;
 }
@@ -6640,7 +6652,7 @@ div[data-baseweb="select"] > div:first-child > div:last-child::after {
 </style>
 """, unsafe_allow_html=True)
 
-# V22.2.1 — force Streamlit/BaseWeb select chevrons to contrast with
+# V22.2.2 — force Streamlit/BaseWeb select chevrons to contrast with
 # Sullivan's actual in-app theme (not the computer/browser theme).
 # `filter` is used because newer Streamlit versions can render the chevron
 # with internal SVG styling that ignores normal fill/color overrides.
@@ -6648,13 +6660,9 @@ if _theme_name == "Dark":
     st.markdown("""
     <style>
 
-    div[data-testid="stExpander"] details {
-        background:#10243a !important;
-        border:1px solid #28415b !important;
-        border-radius:12px !important;
-    }
-    div[data-testid="stExpander"] details summary,
-    div[data-testid="stExpander"] details summary * {
+    .sullivan-bank-connect-title {
+        background:#10243A !important;
+        border:1px solid #28415B !important;
         color:#FFFFFF !important;
         -webkit-text-fill-color:#FFFFFF !important;
     }
@@ -6683,13 +6691,9 @@ else:
     st.markdown("""
     <style>
 
-    div[data-testid="stExpander"] details {
+    .sullivan-bank-connect-title {
         background:#FFFFFF !important;
         border:1px solid #D7E0EA !important;
-        border-radius:12px !important;
-    }
-    div[data-testid="stExpander"] details summary,
-    div[data-testid="stExpander"] details summary * {
         color:#0B1F33 !important;
         -webkit-text-fill-color:#0B1F33 !important;
     }
@@ -8422,7 +8426,7 @@ def v2043_delete_record_control(table, id_col, label_col, title):
 
 
 # ============================================================
-# V22.2.1 — BANK CONNECTIONS + AUTOMATIC TRANSACTION SYNC
+# V22.2.2 — BANK CONNECTIONS + AUTOMATIC TRANSACTION SYNC
 # Plaid Link + cursor-based Transactions Sync
 # ============================================================
 def v222_plaid_secret(name, default=""):
@@ -8615,7 +8619,7 @@ def v222_disconnect(conn):
 def v222_link_component(token):
     # Plaid's JS bundle loads asynchronously inside Streamlit's component iframe.
     # V22.2 initialized Plaid immediately, so clicks could silently do nothing if
-    # the external script had not finished loading. V22.2.1 initializes Link only
+    # the external script had not finished loading. V22.2.2 initializes Link only
     # from the script's onload callback and shows a real loading/error state.
     tok=json.dumps(token)
     components.html(f"""
@@ -8741,11 +8745,18 @@ def v222_render_bank_connections():
             with st.spinner("Syncing bank changes…"):a,m,r=v222_sync_all()
             st.success(f"Updated · {a} added · {m} modified · {r} removed.");st.rerun()
         except Exception as e:st.error(f"Sync failed: {type(e).__name__}: {e}")
-    with st.expander("Connect bank" if conns else "Connect your first bank",expanded=not bool(conns)):
-        try:
-            t=v222_create_link_token()
-            if t:v222_link_component(t)
-        except Exception as e:st.error(f"Could not start Plaid Link: {type(e).__name__}: {e}")
+    st.markdown(
+        '<div class="sullivan-bank-connect-title">'
+        + ("Connect another institution" if conns else "Connect your first bank")
+        + '</div>',
+        unsafe_allow_html=True
+    )
+    try:
+        t=v222_create_link_token()
+        if t:
+            v222_link_component(t)
+    except Exception as e:
+        st.error(f"Could not start Plaid Link: {type(e).__name__}: {e}")
     for n,conn in enumerate(conns):
         a,b=st.columns([4,1]);a.write(f"**{conn.get('institution_name') or 'Connected institution'}**  \nLast sync: {conn.get('last_sync_at') or 'Not yet'}")
         if b.button("Disconnect",key=f"v222_disc_{n}"):v222_disconnect(conn);st.rerun()
@@ -8753,7 +8764,7 @@ def v222_render_bank_connections():
     if not ac.empty:st.markdown("#### Accounts");st.dataframe(ac,use_container_width=True,hide_index=True)
     fd=v222_feed()
     if not fd.empty:st.markdown("#### Latest bank activity");st.dataframe(fd,use_container_width=True,hide_index=True)
-    st.caption("Bank-feed transactions stay separate from the ledger in V22.2.1, preventing accidental duplicate posting.")
+    st.caption("Bank-feed transactions stay separate from the ledger in V22.2.2, preventing accidental duplicate posting.")
 
 
 # ============================================================
@@ -8776,7 +8787,7 @@ V204_CANADA_REGIONS = [
 
 
 # ============================================================
-# V22.2.1 — LIVE GLOBAL TAX PROFILE ENGINE
+# V22.2.2 — LIVE GLOBAL TAX PROFILE ENGINE
 # ============================================================
 # Built-in verified engines remain authoritative for Quebec and Virginia.
 # Other jurisdictions can be researched once with OpenAI web search, cached
@@ -12828,7 +12839,7 @@ with main_sections[5]:
                         st.error(f"Could not refresh the tax profile: {type(e).__name__}: {e}")
 
             st.caption(
-                "V22.2.1 recognizes ISO countries/territories and available first-level regions globally. "
+                "V22.2.2 recognizes ISO countries/territories and available first-level regions globally. "
                 "Detailed tax calculations are only labeled verified where Sullivan has an explicit jurisdiction model; "
                 "unsupported tax formulas are never silently invented."
             )
