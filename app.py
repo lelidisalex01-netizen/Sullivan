@@ -17,10 +17,10 @@ import math
 import html
 import time
 
-st.set_page_config(page_title="Sullivan V22.3.2", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V22.3.3", page_icon="S", layout="wide")
 
 # ============================================================
-# V22.3.2 — GLOBAL COUNTRY + TAX-REGION ARCHITECTURE
+# V22.3.3 — GLOBAL COUNTRY + TAX-REGION ARCHITECTURE
 # ISO 3166 country/territory names and first-level subdivisions
 # are embedded so Sullivan does not depend on a runtime web call.
 # ============================================================
@@ -5252,7 +5252,7 @@ v17_init_auth_tables()
 
 # V22.0.2 automatic cloud safety backup.
 v22_autosave_fragment()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.3.2</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.3.3</span></div>",unsafe_allow_html=True)
 
 
 
@@ -6604,7 +6604,7 @@ st.session_state["v19_ui_theme"] = _theme_name
 
 st.markdown("""
 <style>
-/* V22.3.2 — Bank connection control polish */
+/* V22.3.3 — Bank connection control polish */
 
 .sullivan-bank-connect-title {
     display:block !important;
@@ -6623,7 +6623,7 @@ st.markdown("""
 
 st.markdown(r"""
 <style>
-/* V22.3.2: own the visible select chevron instead of relying on BaseWeb's SVG. */
+/* V22.3.3: own the visible select chevron instead of relying on BaseWeb's SVG. */
 div[data-baseweb="select"] > div:first-child {
     position: relative !important;
 }
@@ -6647,7 +6647,7 @@ div[data-baseweb="select"] > div:first-child > div:last-child::after {
 </style>
 """, unsafe_allow_html=True)
 
-# V22.3.2 — force Streamlit/BaseWeb select chevrons to contrast with
+# V22.3.3 — force Streamlit/BaseWeb select chevrons to contrast with
 # Sullivan's actual in-app theme (not the computer/browser theme).
 # `filter` is used because newer Streamlit versions can render the chevron
 # with internal SVG styling that ignores normal fill/color overrides.
@@ -8421,7 +8421,7 @@ def v2043_delete_record_control(table, id_col, label_col, title):
 
 
 # ============================================================
-# V22.3.2 — BANK CONNECTIONS + AUTOMATIC TRANSACTION SYNC
+# V22.3.3 — BANK CONNECTIONS + AUTOMATIC TRANSACTION SYNC
 # Plaid Link + cursor-based Transactions Sync
 # ============================================================
 def v222_plaid_secret(name, default=""):
@@ -8497,7 +8497,7 @@ def v222_bank_tables():
           completed_at TEXT
         );
         """)
-        # V22.3.2 migration: bind each Hosted Link redirect to the exact Link token
+        # V22.3.3 migration: bind each Hosted Link redirect to the exact Link token
         # that created it. This prevents a later Streamlit rerun/new token from
         # stealing the return flow.
         try:
@@ -8959,26 +8959,28 @@ def v223_candidates_for_feed(feed):
                 name_score=v223_similarity(merchant,rtext)
                 date_score=v223_date_score(dt,rdate)
 
-                # Confidence is intentionally conservative:
-                # exact amount alone is not enough to call something a good match.
-                # Merchant/reference similarity is the strongest signal, date is secondary.
-                if name_score >= 0.90 and date_score >= 0.70:
-                    score = 0.97
-                elif name_score >= 0.78 and date_score >= 0.45:
-                    score = 0.91
-                elif name_score >= 0.62 and date_score >= 0.25:
-                    score = 0.82
-                elif name_score >= 0.45 and date_score > 0:
-                    score = 0.70
-                else:
-                    score = 0.0
+                # V22.3.3: continuous evidence score, not fixed buckets.
+                # Exact amount is already required above, so amount contributes 45%.
+                # Merchant/reference similarity contributes 35%.
+                # Date proximity contributes 20%.
+                amount_score = 1.0
+                score = (
+                    0.45 * amount_score +
+                    0.35 * name_score +
+                    0.20 * date_score
+                )
 
-                # Do not surface weak exact-dollar coincidences as "matches".
-                if score > 0:
+                # An exact-dollar coincidence with weak merchant/date evidence is not enough.
+                if name_score < 0.30 and date_score < 0.20:
+                    score = min(score, 0.49)
+
+                if score >= 0.60:
                     candidates.append({
-                        "kind":kind,"target_id":int(rid),"score":score,
+                        "kind":kind,"target_id":int(rid),"score":min(score,0.99),
                         "label":str(rtext or f"{kind} #{rid}"),
-                        "date":str(rdate or ""),"amount":ramt
+                        "date":str(rdate or ""),"amount":ramt,
+                        "name_score":name_score,"date_score":date_score,
+                        "amount_score":amount_score
                     })
 
         candidates.sort(key=lambda x:x["score"],reverse=True)
@@ -8987,7 +8989,7 @@ def v223_candidates_for_feed(feed):
 
 
 def v223_learned_category_for(merchant):
-    """Return a previously learned Sullivan category for a merchant, if available."""
+    """Return the strongest learned category rule plus measurable evidence."""
     merchant_n=v223_norm(merchant)
     if not merchant_n:
         return None
@@ -8996,7 +8998,7 @@ def v223_learned_category_for(merchant):
         name=v223_physical("learned_rules")
         if not v223_table_exists(c,name):
             return None
-        rows=v223_rows(c,name,1000)
+        rows=v223_rows(c,name,2000)
         best=None
         best_score=0.0
         for r in rows:
@@ -9007,43 +9009,87 @@ def v223_learned_category_for(merchant):
             s=v223_similarity(merchant_n,src)
             if s>best_score:
                 best_score=s
-                best=(str(cat),s)
-        if best and best[1]>=0.72:
+                best={"category":str(cat),"merchant_similarity":s,"rule_text":str(src)}
+        if best and best["merchant_similarity"]>=0.55:
             return best
         return None
     finally:
         c.close()
 
 def v223_category_suggestion(feed):
-    """Build a categorization suggestion distinct from reconciliation matching."""
+    """Calculate a category evidence score from independent measurable signals."""
     merchant=feed.get("merchant_name") or feed.get("name") or ""
-    learned=v223_learned_category_for(merchant)
-    if learned:
-        cat,sim=learned
-        conf=min(0.98,0.84 + 0.14*sim)
-        return {
-            "category":cat,
-            "confidence":conf,
-            "source":"Sullivan learned rule"
-        }
-
     detailed=feed.get("category_detailed")
     primary=feed.get("category_primary")
+    learned=v223_learned_category_for(merchant)
+
+    # Signal 1: Plaid category specificity.
+    # No category=0, primary only=.45, detailed=.70.
+    specificity = 0.0
     if detailed:
-        # Plaid's detailed PFC is meaningful evidence for categorization, but
-        # it is not evidence that the transaction matches an accounting record.
-        return {
-            "category":str(detailed).replace("_"," ").title(),
-            "confidence":0.86,
-            "source":"Plaid detailed category"
-        }
-    if primary:
-        return {
-            "category":str(primary).replace("_"," ").title(),
-            "confidence":0.74,
-            "source":"Plaid category"
-        }
-    return None
+        specificity = 0.70
+    elif primary:
+        specificity = 0.45
+
+    # Signal 2: consistency between Plaid primary and detailed taxonomy.
+    taxonomy_consistency = 0.0
+    if primary and detailed:
+        p=v223_norm(primary)
+        d=v223_norm(detailed)
+        taxonomy_consistency = 1.0 if p and (p in d or d.startswith(p)) else 0.65
+    elif primary or detailed:
+        taxonomy_consistency = 0.35
+
+    # Signal 3: merchant cleanliness/identity. A real merchant name is stronger than
+    # a generic transaction description such as "POS DEBIT" or "TRANSFER".
+    merchant_n=v223_norm(merchant)
+    generic_terms={"transfer","payment","purchase","debit","credit","transaction","online","pos","ach"}
+    tokens=[t for t in merchant_n.split() if t]
+    informative=[t for t in tokens if t not in generic_terms and len(t)>=3]
+    merchant_signal=min(1.0, len(informative)/3.0) if informative else 0.0
+
+    # Signal 4: Sullivan learned history. This is the strongest categorization evidence.
+    learned_signal=0.0
+    learned_category=None
+    learned_similarity=0.0
+    if learned:
+        learned_category=learned["category"]
+        learned_similarity=float(learned["merchant_similarity"])
+        learned_signal=learned_similarity
+
+    # Weighted continuous calculation. These are evidence weights, not a fake
+    # statistical probability model.
+    evidence = (
+        0.30 * specificity +
+        0.15 * taxonomy_consistency +
+        0.15 * merchant_signal +
+        0.40 * learned_signal
+    )
+
+    # If there is no learned history yet, Plaid can still provide a useful category,
+    # but the score stays appropriately moderate rather than pretending to be 86%.
+    if learned_category:
+        category=learned_category
+        source="Sullivan history + Plaid"
+    elif detailed:
+        category=str(detailed).replace("_"," ").title()
+        source="Plaid detailed category"
+    elif primary:
+        category=str(primary).replace("_"," ").title()
+        source="Plaid primary category"
+    else:
+        return None
+
+    return {
+        "category":category,
+        "confidence":min(max(evidence,0.0),0.99),
+        "source":source,
+        "specificity":specificity,
+        "taxonomy_consistency":taxonomy_consistency,
+        "merchant_signal":merchant_signal,
+        "learned_signal":learned_signal,
+        "learned_similarity":learned_similarity,
+    }
 
 def v223_analyze_feed():
     """Refresh deterministic suggestions without posting anything."""
@@ -9070,12 +9116,22 @@ def v223_analyze_feed():
         cand=v223_candidates_for_feed(f)
         if cand:
             top=cand[0]
-            note=f'{top["kind"].title()} #{top["target_id"]} · {top["label"]}'
+            note=(
+                f'{top["kind"].title()} #{top["target_id"]} · {top["label"]} · '
+                f'calculation: amount {top["amount_score"]:.0%} ×45% + '
+                f'merchant {top["name_score"]:.0%} ×35% + date {top["date_score"]:.0%} ×20%'
+            )
             updates.append((top["kind"],top["target_id"],top["score"],note,f["id"]))
         else:
             sugg=v223_category_suggestion(f)
             if sugg:
-                note=f'Category suggestion: {sugg["category"]} · {sugg["source"]}'
+                note=(
+                    f'Category suggestion: {sugg["category"]} · {sugg["source"]} · '
+                    f'calculation: specificity {sugg["specificity"]:.0%} ×30% + '
+                    f'taxonomy {sugg["taxonomy_consistency"]:.0%} ×15% + '
+                    f'merchant {sugg["merchant_signal"]:.0%} ×15% + '
+                    f'learned history {sugg["learned_signal"]:.0%} ×40%'
+                )
                 updates.append(("category",None,sugg["confidence"],note,f["id"]))
             else:
                 updates.append(("category",None,None,"Needs review · Sullivan does not have enough evidence to suggest a category.",f["id"]))
@@ -9144,7 +9200,7 @@ def v223_reset(feed_id):
 
 def v223_render_reconciliation():
     st.markdown("### Smart reconciliation")
-    st.caption("Sullivan separates reconciliation confidence from categorization confidence. A transaction can have a strong category suggestion even when there is no invoice, bill, payment or ledger record to match. Nothing is posted automatically.")
+    st.caption("Sullivan now calculates scores from the evidence available for each transaction instead of assigning fixed percentages. Reconciliation and categorization remain separate, and nothing is posted automatically.")
     rows=v223_feed_rows()
     if not rows:
         st.info("Connect and sync a bank to start reconciliation.")
@@ -9155,7 +9211,7 @@ def v223_render_reconciliation():
     b.metric("Matched",sum(1 for r in rows if r["ledger_status"]=="matched"))
     c.metric("Pending",sum(1 for r in rows if r["pending"]))
     d.metric("Ignored",sum(1 for r in rows if r["ledger_status"]=="ignored"))
-    st.caption("Match confidence: 90–99% strong · 80–89% good · 70–79% possible. Category confidence is shown separately and never means the transaction is reconciled.")
+    st.caption("Match score is calculated from amount, merchant similarity and date proximity. Category evidence is calculated separately from Plaid specificity, taxonomy consistency, merchant quality and Sullivan's learned history.")
 
     if st.button("Analyze unmatched transactions",key="v223_analyze",type="primary",use_container_width=True):
         with st.spinner("Comparing bank activity with Sullivan records…"):
@@ -9184,15 +9240,15 @@ def v223_render_reconciliation():
                     conf=float(raw_conf)
                     if r["reconciliation_type"]=="category":
                         if conf >= 0.85:
-                            st.markdown(f"**{conf:.0%} · Category confidence**")
+                            st.markdown(f"**{conf:.0%} · Category evidence**")
                         else:
-                            st.markdown(f"**{conf:.0%} · Category suggestion**")
-                    elif conf >= 0.90:
-                        st.markdown(f"**{conf:.0%} · Strong match**")
-                    elif conf >= 0.80:
-                        st.markdown(f"**{conf:.0%} · Good match**")
-                    elif conf >= 0.70:
-                        st.markdown(f"**{conf:.0%} · Possible match**")
+                            st.markdown(f"**{conf:.0%} · Category evidence**")
+                    elif conf >= 0.85:
+                        st.markdown(f"**{conf:.0%} · Strong match score**")
+                    elif conf >= 0.72:
+                        st.markdown(f"**{conf:.0%} · Good match score**")
+                    elif conf >= 0.60:
+                        st.markdown(f"**{conf:.0%} · Possible match score**")
                 elif r["reconciliation_type"]=="category":
                     st.markdown("**Needs review**")
 
@@ -9208,11 +9264,11 @@ def v223_render_reconciliation():
                 x,y,z=st.columns(3)
                 with x:
                     conf=float(r["reconciliation_confidence"] or 0)
-                    if target and typ not in ("category","pending") and conf >= 0.70:
-                        label="Accept match" if conf >= 0.80 else "Review & accept"
+                    if target and typ not in ("category","pending") and conf >= 0.60:
+                        label="Accept match" if conf >= 0.85 else "Review & accept"
                         if st.button(label,key=f'v223_accept_{r["id"]}',use_container_width=True):
                             v223_mark_match(r["id"]);st.rerun()
-                    elif typ=="category" and conf >= 0.70:
+                    elif typ=="category" and conf >= 0.25:
                         st.button("Category suggested",key=f'v223_cat_{r["id"]}',use_container_width=True,disabled=True)
                 with y:
                     if st.button("Ignore",key=f'v223_ignore_{r["id"]}',use_container_width=True):
@@ -9283,7 +9339,7 @@ def v222_render_bank_connections():
     if not ac.empty:st.markdown("#### Accounts");st.dataframe(ac,use_container_width=True,hide_index=True)
     fd=v222_feed()
     if not fd.empty:st.markdown("#### Latest bank activity");st.dataframe(fd,use_container_width=True,hide_index=True)
-    st.caption("Bank-feed transactions stay separate from the ledger in V22.3.2, preventing accidental duplicate posting.")
+    st.caption("Bank-feed transactions stay separate from the ledger in V22.3.3, preventing accidental duplicate posting.")
     st.divider()
     v223_render_reconciliation()
 
@@ -9308,7 +9364,7 @@ V204_CANADA_REGIONS = [
 
 
 # ============================================================
-# V22.3.2 — LIVE GLOBAL TAX PROFILE ENGINE
+# V22.3.3 — LIVE GLOBAL TAX PROFILE ENGINE
 # ============================================================
 # Built-in verified engines remain authoritative for Quebec and Virginia.
 # Other jurisdictions can be researched once with OpenAI web search, cached
@@ -13360,7 +13416,7 @@ with main_sections[5]:
                         st.error(f"Could not refresh the tax profile: {type(e).__name__}: {e}")
 
             st.caption(
-                "V22.3.2 recognizes ISO countries/territories and available first-level regions globally. "
+                "V22.3.3 recognizes ISO countries/territories and available first-level regions globally. "
                 "Detailed tax calculations are only labeled verified where Sullivan has an explicit jurisdiction model; "
                 "unsupported tax formulas are never silently invented."
             )
