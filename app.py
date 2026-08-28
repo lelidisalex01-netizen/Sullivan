@@ -16,10 +16,10 @@ import math
 import html
 import time
 
-st.set_page_config(page_title="Sullivan V22.2.4", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V22.2.5", page_icon="S", layout="wide")
 
 # ============================================================
-# V22.2.4 — GLOBAL COUNTRY + TAX-REGION ARCHITECTURE
+# V22.2.5 — GLOBAL COUNTRY + TAX-REGION ARCHITECTURE
 # ISO 3166 country/territory names and first-level subdivisions
 # are embedded so Sullivan does not depend on a runtime web call.
 # ============================================================
@@ -5251,7 +5251,7 @@ v17_init_auth_tables()
 
 # V22.0.2 automatic cloud safety backup.
 v22_autosave_fragment()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.2.4</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.2.5</span></div>",unsafe_allow_html=True)
 
 
 
@@ -6603,7 +6603,7 @@ st.session_state["v19_ui_theme"] = _theme_name
 
 st.markdown("""
 <style>
-/* V22.2.4 — Bank connection control polish */
+/* V22.2.5 — Bank connection control polish */
 
 .sullivan-bank-connect-title {
     display:block !important;
@@ -6622,7 +6622,7 @@ st.markdown("""
 
 st.markdown(r"""
 <style>
-/* V22.2.4: own the visible select chevron instead of relying on BaseWeb's SVG. */
+/* V22.2.5: own the visible select chevron instead of relying on BaseWeb's SVG. */
 div[data-baseweb="select"] > div:first-child {
     position: relative !important;
 }
@@ -6646,7 +6646,7 @@ div[data-baseweb="select"] > div:first-child > div:last-child::after {
 </style>
 """, unsafe_allow_html=True)
 
-# V22.2.4 — force Streamlit/BaseWeb select chevrons to contrast with
+# V22.2.5 — force Streamlit/BaseWeb select chevrons to contrast with
 # Sullivan's actual in-app theme (not the computer/browser theme).
 # `filter` is used because newer Streamlit versions can render the chevron
 # with internal SVG styling that ignores normal fill/color overrides.
@@ -8420,7 +8420,7 @@ def v2043_delete_record_control(table, id_col, label_col, title):
 
 
 # ============================================================
-# V22.2.4 — BANK CONNECTIONS + AUTOMATIC TRANSACTION SYNC
+# V22.2.5 — BANK CONNECTIONS + AUTOMATIC TRANSACTION SYNC
 # Plaid Link + cursor-based Transactions Sync
 # ============================================================
 def v222_plaid_secret(name, default=""):
@@ -8559,59 +8559,80 @@ def v222_latest_pending_link():
     finally:c.close()
 
 def v222_finish_hosted_link():
-    """Resolve the completed Hosted Link session from /link/token/get and exchange its public token."""
+    """Resolve the completed Hosted Link session and exchange every successful public token."""
     pending=v222_latest_pending_link()
     if not pending:
         raise RuntimeError("No pending Plaid connection session was found. Start Connect bank again.")
 
     d=v222_plaid_post("/link/token/get",{"link_token":pending["link_token"]})
 
-    # Plaid's current Hosted Link response nests successful public tokens under:
-    # results.item_add_results[].public_token
-    results=d.get("results") or {}
-    item_results=results.get("item_add_results") or []
+    # Plaid returns Hosted Link completion data inside link_sessions[].
+    # Choose the most recent finished session, falling back to the latest session.
+    sessions=d.get("link_sessions") or []
+    session=None
+    finished_sessions=[s for s in sessions if isinstance(s,dict) and s.get("finished_at")]
+    if finished_sessions:
+        session=finished_sessions[-1]
+    elif sessions:
+        session=sessions[-1]
+
+    if not isinstance(session,dict):
+        raise RuntimeError("Plaid has not created a Link session for this connection yet.")
+
     public_tokens=[]
     institutions=[]
+
+    # Current schema:
+    # link_sessions[].results.item_add_results[].public_token
+    results=session.get("results") or {}
+    item_results=results.get("item_add_results") or []
     for item_result in item_results:
         if not isinstance(item_result,dict):
             continue
         pt=item_result.get("public_token")
-        if pt:
-            public_tokens.append(pt)
-            inst=item_result.get("institution") or {}
-            institutions.append((
-                inst.get("institution_id") or "",
-                inst.get("name") or "Plaid institution"
-            ))
+        if not pt:
+            continue
+        inst=item_result.get("institution") or {}
+        public_tokens.append(pt)
+        institutions.append((
+            inst.get("institution_id") or "",
+            inst.get("name") or "Plaid institution"
+        ))
 
-    # Legacy Hosted Link responses may expose on_success.public_token.
+    # Legacy fallback:
+    # link_sessions[].on_success.public_token
     if not public_tokens:
-        on_success=d.get("on_success") or {}
-        pt=on_success.get("public_token") if isinstance(on_success,dict) else None
-        if pt:
-            public_tokens=[pt]
-            md=on_success.get("metadata") or {}
-            inst=md.get("institution") or {} if isinstance(md,dict) else {}
-            institutions=[(
-                inst.get("institution_id") or "",
-                inst.get("name") or "Plaid institution"
-            )]
+        on_success=session.get("on_success") or {}
+        if isinstance(on_success,dict):
+            pt=on_success.get("public_token")
+            if pt:
+                md=on_success.get("metadata") or {}
+                inst=md.get("institution") or {} if isinstance(md,dict) else {}
+                public_tokens=[pt]
+                institutions=[(
+                    inst.get("institution_id") or "",
+                    inst.get("name") or "Plaid institution"
+                )]
 
     if not public_tokens:
-        # completion_redirect_uri fires for both successful completion and user exit.
-        # Use finished_at/exit data for a useful error instead of assuming success.
-        sessions=d.get("link_sessions") or []
-        latest=sessions[-1] if sessions else {}
-        exit_obj=(latest.get("exit") or latest.get("on_exit") or {}) if isinstance(latest,dict) else {}
-        finished=latest.get("finished_at") if isinstance(latest,dict) else None
-        if exit_obj:
-            status=exit_obj.get("status") or "exited"
-            raise RuntimeError(f"Plaid Link was exited before a bank was connected ({status}).")
-        if not finished:
-            raise RuntimeError("Plaid has not marked the Hosted Link session complete yet. Wait a moment and try finishing again.")
-        raise RuntimeError("Plaid finished the Link session but did not return a bank connection token.")
+        if not session.get("finished_at"):
+            raise RuntimeError(
+                "Plaid has not marked the Hosted Link session complete yet. "
+                "Wait a moment, then click Try finishing connection again."
+            )
 
-    # Multi-Item Hosted Link can return more than one token. Exchange every result.
+        # An exit callback/session can finish without creating an Item.
+        on_exit=session.get("on_exit") or {}
+        if isinstance(on_exit,dict) and on_exit:
+            err=on_exit.get("error") or {}
+            display=(err.get("display_message") if isinstance(err,dict) else None)
+            raise RuntimeError(display or "Plaid Link was closed before a bank was connected.")
+
+        raise RuntimeError(
+            "Plaid completed the session but no bank Item was added. "
+            "Start the connection again and finish the bank selection through the final Plaid confirmation screen."
+        )
+
     connected=[]
     for i,pt in enumerate(public_tokens):
         iid,name=institutions[i] if i < len(institutions) else ("","Plaid institution")
@@ -8623,7 +8644,8 @@ def v222_finish_hosted_link():
         c.execute("""UPDATE plaid_link_sessions SET status='completed',completed_at=?
         WHERE id=? AND workspace_key=?""",(now,pending["id"],v222_wk()))
         c.commit()
-    finally:c.close()
+    finally:
+        c.close()
     return connected
 
 def v222_exchange(public_token,inst_id="",inst_name=""):
@@ -8798,7 +8820,7 @@ def v222_render_bank_connections():
     if not ac.empty:st.markdown("#### Accounts");st.dataframe(ac,use_container_width=True,hide_index=True)
     fd=v222_feed()
     if not fd.empty:st.markdown("#### Latest bank activity");st.dataframe(fd,use_container_width=True,hide_index=True)
-    st.caption("Bank-feed transactions stay separate from the ledger in V22.2.4, preventing accidental duplicate posting.")
+    st.caption("Bank-feed transactions stay separate from the ledger in V22.2.5, preventing accidental duplicate posting.")
 
 
 # ============================================================
@@ -8821,7 +8843,7 @@ V204_CANADA_REGIONS = [
 
 
 # ============================================================
-# V22.2.4 — LIVE GLOBAL TAX PROFILE ENGINE
+# V22.2.5 — LIVE GLOBAL TAX PROFILE ENGINE
 # ============================================================
 # Built-in verified engines remain authoritative for Quebec and Virginia.
 # Other jurisdictions can be researched once with OpenAI web search, cached
@@ -12873,7 +12895,7 @@ with main_sections[5]:
                         st.error(f"Could not refresh the tax profile: {type(e).__name__}: {e}")
 
             st.caption(
-                "V22.2.4 recognizes ISO countries/territories and available first-level regions globally. "
+                "V22.2.5 recognizes ISO countries/territories and available first-level regions globally. "
                 "Detailed tax calculations are only labeled verified where Sullivan has an explicit jurisdiction model; "
                 "unsupported tax formulas are never silently invented."
             )
