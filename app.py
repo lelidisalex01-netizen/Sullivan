@@ -1,3 +1,4 @@
+import uuid
 import os, re, sqlite3, hashlib, json, zipfile, shutil, uuid, secrets, hmac, base64
 import textwrap
 from pathlib import Path
@@ -16,10 +17,10 @@ import math
 import html
 import time
 
-st.set_page_config(page_title="Sullivan V22.2.5", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V22.2.6", page_icon="S", layout="wide")
 
 # ============================================================
-# V22.2.5 — GLOBAL COUNTRY + TAX-REGION ARCHITECTURE
+# V22.2.6 — GLOBAL COUNTRY + TAX-REGION ARCHITECTURE
 # ISO 3166 country/territory names and first-level subdivisions
 # are embedded so Sullivan does not depend on a runtime web call.
 # ============================================================
@@ -5251,7 +5252,7 @@ v17_init_auth_tables()
 
 # V22.0.2 automatic cloud safety backup.
 v22_autosave_fragment()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.2.5</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.2.6</span></div>",unsafe_allow_html=True)
 
 
 
@@ -6603,7 +6604,7 @@ st.session_state["v19_ui_theme"] = _theme_name
 
 st.markdown("""
 <style>
-/* V22.2.5 — Bank connection control polish */
+/* V22.2.6 — Bank connection control polish */
 
 .sullivan-bank-connect-title {
     display:block !important;
@@ -6622,7 +6623,7 @@ st.markdown("""
 
 st.markdown(r"""
 <style>
-/* V22.2.5: own the visible select chevron instead of relying on BaseWeb's SVG. */
+/* V22.2.6: own the visible select chevron instead of relying on BaseWeb's SVG. */
 div[data-baseweb="select"] > div:first-child {
     position: relative !important;
 }
@@ -6646,7 +6647,7 @@ div[data-baseweb="select"] > div:first-child > div:last-child::after {
 </style>
 """, unsafe_allow_html=True)
 
-# V22.2.5 — force Streamlit/BaseWeb select chevrons to contrast with
+# V22.2.6 — force Streamlit/BaseWeb select chevrons to contrast with
 # Sullivan's actual in-app theme (not the computer/browser theme).
 # `filter` is used because newer Streamlit versions can render the chevron
 # with internal SVG styling that ignores normal fill/color overrides.
@@ -8420,7 +8421,7 @@ def v2043_delete_record_control(table, id_col, label_col, title):
 
 
 # ============================================================
-# V22.2.5 — BANK CONNECTIONS + AUTOMATIC TRANSACTION SYNC
+# V22.2.6 — BANK CONNECTIONS + AUTOMATIC TRANSACTION SYNC
 # Plaid Link + cursor-based Transactions Sync
 # ============================================================
 def v222_plaid_secret(name, default=""):
@@ -8487,11 +8488,21 @@ def v222_bank_tables():
           workspace_key TEXT NOT NULL,
           link_token TEXT NOT NULL,
           hosted_link_url TEXT,
+          return_state TEXT,
           status TEXT NOT NULL DEFAULT 'pending',
           created_at TEXT NOT NULL,
           completed_at TEXT
         );
         """)
+        # V22.2.6 migration: bind each Hosted Link redirect to the exact Link token
+        # that created it. This prevents a later Streamlit rerun/new token from
+        # stealing the return flow.
+        try:
+            cols=[r[1] for r in c.execute("PRAGMA table_info(plaid_link_sessions)").fetchall()]
+            if "return_state" not in cols:
+                c.execute("ALTER TABLE plaid_link_sessions ADD COLUMN return_state TEXT")
+        except Exception:
+            pass
         c.commit()
     finally: c.close()
 
@@ -8513,9 +8524,11 @@ def v222_app_url():
         return "https://sullivan-accounting.streamlit.app"
 
 def v222_create_link_token():
-    """Create a Plaid Hosted Link session instead of loading Plaid JS in Streamlit's iframe."""
+    """Create a Plaid Hosted Link session bound to a unique Sullivan return state."""
     uid=hashlib.sha256(("sullivan:"+v222_wk()).encode()).hexdigest()[:48]
-    completion=v222_app_url()+"/?plaid_hosted_return=1"
+    return_state=uuid.uuid4().hex
+    completion=v222_app_url()+"/?plaid_hosted_return="+return_state
+
     data=v222_plaid_post("/link/token/create",{
       "user":{"client_user_id":uid},
       "client_name":"Sullivan",
@@ -8531,38 +8544,72 @@ def v222_create_link_token():
     hosted_url=data.get("hosted_link_url")
     if not link_token or not hosted_url:
         raise RuntimeError("Plaid did not return a Hosted Link URL.")
+
     now=datetime.now().isoformat(timespec="seconds")
     c=connect()
     try:
+        # Do not invalidate older sessions here: Plaid may still be finishing one
+        # in another tab. Exact return_state matching makes concurrent sessions safe.
         c.execute("""INSERT INTO plaid_link_sessions
-        (workspace_key,link_token,hosted_link_url,status,created_at)
-        VALUES(?,?,?,?,?)""",(v222_wk(),link_token,hosted_url,"pending",now))
-        # Keep only a small recent history per workspace.
-        c.execute("""DELETE FROM plaid_link_sessions WHERE workspace_key=? AND id NOT IN
-        (SELECT id FROM plaid_link_sessions WHERE workspace_key=? ORDER BY id DESC LIMIT 12)""",
+        (workspace_key,link_token,hosted_link_url,return_state,status,created_at)
+        VALUES(?,?,?,?,?,?)""",
+        (v222_wk(),link_token,hosted_url,return_state,"pending",now))
+        c.execute("""DELETE FROM plaid_link_sessions
+        WHERE workspace_key=? AND id NOT IN
+        (SELECT id FROM plaid_link_sessions WHERE workspace_key=? ORDER BY id DESC LIMIT 20)""",
         (v222_wk(),v222_wk()))
         c.commit()
     finally:
         c.close()
-    return {"link_token":link_token,"hosted_link_url":hosted_url}
 
-def v222_latest_pending_link():
+    return {
+        "link_token":link_token,
+        "hosted_link_url":hosted_url,
+        "return_state":return_state
+    }
+
+def v222_pending_link_by_state(return_state):
+    """Find the exact Hosted Link token associated with Plaid's return URL."""
+    if not return_state:
+        return None
     v222_bank_tables()
     c=connect()
     try:
-        row=c.execute("""SELECT id,link_token,hosted_link_url,created_at
+        row=c.execute("""SELECT id,link_token,hosted_link_url,return_state,created_at
+        FROM plaid_link_sessions
+        WHERE workspace_key=? AND return_state=? AND status='pending'
+        ORDER BY id DESC LIMIT 1""",(v222_wk(),str(return_state))).fetchone()
+        if not row:
+            return None
+        return dict(zip(
+            ["id","link_token","hosted_link_url","return_state","created_at"],row
+        ))
+    finally:
+        c.close()
+
+def v222_latest_pending_link():
+    """Used only to reuse an already prepared Link button; never to resolve a return."""
+    v222_bank_tables()
+    c=connect()
+    try:
+        row=c.execute("""SELECT id,link_token,hosted_link_url,return_state,created_at
         FROM plaid_link_sessions
         WHERE workspace_key=? AND status='pending'
         ORDER BY id DESC LIMIT 1""",(v222_wk(),)).fetchone()
         if not row:return None
-        return dict(zip(["id","link_token","hosted_link_url","created_at"],row))
+        return dict(zip(
+            ["id","link_token","hosted_link_url","return_state","created_at"],row
+        ))
     finally:c.close()
 
-def v222_finish_hosted_link():
-    """Resolve the completed Hosted Link session and exchange every successful public token."""
-    pending=v222_latest_pending_link()
+def v222_finish_hosted_link(return_state):
+    """Resolve the exact Hosted Link session identified by Sullivan's return state."""
+    pending=v222_pending_link_by_state(return_state)
     if not pending:
-        raise RuntimeError("No pending Plaid connection session was found. Start Connect bank again.")
+        raise RuntimeError(
+            "This Plaid return no longer matches an active Sullivan connection session. "
+            "Clear the return and start the bank connection again."
+        )
 
     d=v222_plaid_post("/link/token/get",{"link_token":pending["link_token"]})
 
@@ -8756,11 +8803,13 @@ def v222_disconnect(conn):
     write(fn)
 
 def v222_handle_return():
-    if str(st.query_params.get("plaid_hosted_return","")) != "1":
+    return_state=str(st.query_params.get("plaid_hosted_return","") or "")
+    if not return_state:
         return
+
     try:
         with st.spinner("Finishing secure bank connection…"):
-            item_ids=v222_finish_hosted_link()
+            item_ids=v222_finish_hosted_link(return_state)
             rows=v222_connection_rows()
             for item_id in item_ids:
                 conn=next((x for x in rows if x["item_id"]==item_id),None)
@@ -8768,16 +8817,28 @@ def v222_handle_return():
                     v222_sync_one(conn)
         try: del st.query_params["plaid_hosted_return"]
         except Exception: pass
+        st.session_state.pop("v226_prepared_plaid_link",None)
         st.success("Bank connected successfully.")
         st.rerun()
     except Exception as e:
         st.error(f"Bank connection failed: {type(e).__name__}: {e}")
         c1,c2=st.columns(2)
         with c1:
-            if st.button("Try finishing connection again",key="v224_retry_finish",use_container_width=True):
+            if st.button("Try finishing connection again",key="v226_retry_finish",use_container_width=True):
                 st.rerun()
         with c2:
-            if st.button("Clear bank return and start over",key="v224_clear_return",use_container_width=True):
+            if st.button("Clear bank return and start over",key="v226_clear_return",use_container_width=True):
+                # Mark only this exact failed/abandoned session so it cannot be
+                # accidentally reused later.
+                try:
+                    c=connect()
+                    c.execute("""UPDATE plaid_link_sessions SET status='abandoned'
+                    WHERE workspace_key=? AND return_state=? AND status='pending'""",
+                    (v222_wk(),return_state))
+                    c.commit()
+                    c.close()
+                except Exception:
+                    pass
                 try: del st.query_params["plaid_hosted_return"]
                 except Exception: pass
                 st.rerun()
@@ -8802,17 +8863,38 @@ def v222_render_bank_connections():
         + '</div>',
         unsafe_allow_html=True
     )
-    try:
-        hosted=v222_create_link_token()
+    # Never create a Plaid link_token just because Streamlit reran the page.
+    # Prepare one explicitly, then keep that exact Hosted Link URL stable.
+    prepared=st.session_state.get("v226_prepared_plaid_link")
+    if prepared:
         st.link_button(
-            "Connect a bank",
-            hosted["hosted_link_url"],
+            "Open secure Plaid connection",
+            prepared["hosted_link_url"],
             type="primary",
             use_container_width=True
         )
-        st.caption("Opens Plaid's secure hosted connection page. Sullivan never receives your bank password.")
-    except Exception as e:
-        st.error(f"Could not start Plaid Hosted Link: {type(e).__name__}: {e}")
+        if st.button("Cancel prepared connection",key="v226_cancel_prepared",use_container_width=True):
+            try:
+                c=connect()
+                c.execute("""UPDATE plaid_link_sessions SET status='abandoned'
+                WHERE workspace_key=? AND return_state=? AND status='pending'""",
+                (v222_wk(),prepared.get("return_state")))
+                c.commit();c.close()
+            except Exception:
+                pass
+            st.session_state.pop("v226_prepared_plaid_link",None)
+            st.rerun()
+    else:
+        if st.button("Connect a bank",type="primary",key="v226_prepare_bank",use_container_width=True):
+            try:
+                with st.spinner("Preparing secure Plaid connection…"):
+                    hosted=v222_create_link_token()
+                st.session_state["v226_prepared_plaid_link"]=hosted
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not start Plaid Hosted Link: {type(e).__name__}: {e}")
+
+    st.caption("Opens Plaid's secure hosted connection page. Sullivan never receives your bank password.")
     for n,conn in enumerate(conns):
         a,b=st.columns([4,1]);a.write(f"**{conn.get('institution_name') or 'Connected institution'}**  \nLast sync: {conn.get('last_sync_at') or 'Not yet'}")
         if b.button("Disconnect",key=f"v222_disc_{n}"):v222_disconnect(conn);st.rerun()
@@ -8820,7 +8902,7 @@ def v222_render_bank_connections():
     if not ac.empty:st.markdown("#### Accounts");st.dataframe(ac,use_container_width=True,hide_index=True)
     fd=v222_feed()
     if not fd.empty:st.markdown("#### Latest bank activity");st.dataframe(fd,use_container_width=True,hide_index=True)
-    st.caption("Bank-feed transactions stay separate from the ledger in V22.2.5, preventing accidental duplicate posting.")
+    st.caption("Bank-feed transactions stay separate from the ledger in V22.2.6, preventing accidental duplicate posting.")
 
 
 # ============================================================
@@ -8843,7 +8925,7 @@ V204_CANADA_REGIONS = [
 
 
 # ============================================================
-# V22.2.5 — LIVE GLOBAL TAX PROFILE ENGINE
+# V22.2.6 — LIVE GLOBAL TAX PROFILE ENGINE
 # ============================================================
 # Built-in verified engines remain authoritative for Quebec and Virginia.
 # Other jurisdictions can be researched once with OpenAI web search, cached
@@ -12895,7 +12977,7 @@ with main_sections[5]:
                         st.error(f"Could not refresh the tax profile: {type(e).__name__}: {e}")
 
             st.caption(
-                "V22.2.5 recognizes ISO countries/territories and available first-level regions globally. "
+                "V22.2.6 recognizes ISO countries/territories and available first-level regions globally. "
                 "Detailed tax calculations are only labeled verified where Sullivan has an explicit jurisdiction model; "
                 "unsupported tax formulas are never silently invented."
             )
