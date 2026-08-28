@@ -17,10 +17,10 @@ import math
 import html
 import time
 
-st.set_page_config(page_title="Sullivan V22.3.4", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V22.3.5", page_icon="S", layout="wide")
 
 # ============================================================
-# V22.3.4 — GLOBAL COUNTRY + TAX-REGION ARCHITECTURE
+# V22.3.5 — GLOBAL COUNTRY + TAX-REGION ARCHITECTURE
 # ISO 3166 country/territory names and first-level subdivisions
 # are embedded so Sullivan does not depend on a runtime web call.
 # ============================================================
@@ -5252,7 +5252,7 @@ v17_init_auth_tables()
 
 # V22.0.2 automatic cloud safety backup.
 v22_autosave_fragment()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.3.4</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.3.5</span></div>",unsafe_allow_html=True)
 
 
 
@@ -6604,7 +6604,7 @@ st.session_state["v19_ui_theme"] = _theme_name
 
 st.markdown("""
 <style>
-/* V22.3.4 — Bank connection control polish */
+/* V22.3.5 — Bank connection control polish */
 
 .sullivan-bank-connect-title {
     display:block !important;
@@ -6623,7 +6623,7 @@ st.markdown("""
 
 st.markdown(r"""
 <style>
-/* V22.3.4: own the visible select chevron instead of relying on BaseWeb's SVG. */
+/* V22.3.5: own the visible select chevron instead of relying on BaseWeb's SVG. */
 div[data-baseweb="select"] > div:first-child {
     position: relative !important;
 }
@@ -6647,7 +6647,7 @@ div[data-baseweb="select"] > div:first-child > div:last-child::after {
 </style>
 """, unsafe_allow_html=True)
 
-# V22.3.4 — force Streamlit/BaseWeb select chevrons to contrast with
+# V22.3.5 — force Streamlit/BaseWeb select chevrons to contrast with
 # Sullivan's actual in-app theme (not the computer/browser theme).
 # `filter` is used because newer Streamlit versions can render the chevron
 # with internal SVG styling that ignores normal fill/color overrides.
@@ -8421,7 +8421,7 @@ def v2043_delete_record_control(table, id_col, label_col, title):
 
 
 # ============================================================
-# V22.3.4 — BANK CONNECTIONS + AUTOMATIC TRANSACTION SYNC
+# V22.3.5 — BANK CONNECTIONS + AUTOMATIC TRANSACTION SYNC
 # Plaid Link + cursor-based Transactions Sync
 # ============================================================
 def v222_plaid_secret(name, default=""):
@@ -8497,7 +8497,7 @@ def v222_bank_tables():
           completed_at TEXT
         );
         """)
-        # V22.3.4 migration: bind each Hosted Link redirect to the exact Link token
+        # V22.3.5 migration: bind each Hosted Link redirect to the exact Link token
         # that created it. This prevents a later Streamlit rerun/new token from
         # stealing the return flow.
         try:
@@ -8911,80 +8911,106 @@ def v223_physical(logical):
         except Exception:return logical
 
 def v223_candidates_for_feed(feed):
-    """Build deterministic reconciliation candidates from Sullivan accounting records."""
+    """Find realistic reconciliation candidates across Sullivan records."""
     c=connect()
     try:
-        amt=v223_money(feed.get("amount"))
+        bank_amt=float(feed.get("amount") or 0)
+        amt=abs(bank_amt)
         dt=feed.get("posted_date") or feed.get("authorized_date")
         merchant=feed.get("merchant_name") or feed.get("name") or ""
         candidates=[]
 
         specs=[
-            ("invoice","invoices",
-             ["id"],["total","amount","total_amount","balance_due"],
+            ("invoice","invoices",["id"],["total","amount","total_amount","balance_due"],
              ["customer_name","customer","memo","description","invoice_number"],
              ["date","invoice_date","due_date","created_at"]),
-            ("bill","bills",
-             ["id"],["total","amount","total_amount","balance_due"],
+            ("bill","bills",["id"],["total","amount","total_amount","balance_due"],
              ["vendor_name","vendor","memo","description","bill_number"],
              ["date","bill_date","due_date","created_at"]),
-            ("invoice payment","invoice_payments",
-             ["id"],["amount","payment_amount"],
-             ["memo","reference","customer_name"],
-             ["date","payment_date","created_at"]),
-            ("bill payment","bill_payments",
-             ["id"],["amount","payment_amount"],
-             ["memo","reference","vendor_name"],
-             ["date","payment_date","created_at"]),
-            ("ledger transaction","transactions",
-             ["id"],["amount","total","value"],
+            ("invoice payment","invoice_payments",["id"],["amount","payment_amount"],
+             ["memo","reference","customer_name"],["date","payment_date","created_at"]),
+            ("bill payment","bill_payments",["id"],["amount","payment_amount"],
+             ["memo","reference","vendor_name"],["date","payment_date","created_at"]),
+            ("ledger transaction","transactions",["id"],["amount","total","value"],
              ["merchant","merchant_name","description","memo","name","counterparty"],
              ["date","transaction_date","posted_date","created_at"]),
-            ("manual journal","manual_journals",
-             ["id"],["amount","total"],
-             ["memo","description","reference"],
-             ["date","journal_date","created_at"]),
+            ("manual journal","manual_journals",["id"],["amount","total"],
+             ["memo","description","reference"],["date","journal_date","created_at"]),
         ]
 
         for kind,logical,idnames,amtnames,textnames,datenames in specs:
             name=v223_physical(logical)
-            for r in v223_rows(c,name,1500):
-                rid=v223_pick(r,idnames)
-                rv=v223_pick(r,amtnames)
-                if rid is None or rv is None:continue
-                ramt=v223_money(rv)
-                if abs(ramt-amt)>0.01:continue
+            for r in v223_rows(c,name,2500):
+                rid=v223_pick(r,idnames); rv=v223_pick(r,amtnames)
+                if rid is None or rv is None: continue
+                try: ramt=abs(float(rv))
+                except Exception: continue
+                if max(amt,ramt,0.01)==0: continue
+
+                diff=abs(ramt-amt)
+                pct_diff=diff/max(amt,ramt,0.01)
+                # Real-world tolerance: exact/near amount can match; >10% is too loose.
+                if pct_diff > 0.10 and diff > 5.00: continue
+                amount_score=max(0.0,1.0-pct_diff*5.0)
+
                 rtext=v223_pick(r,textnames) or ""
                 rdate=v223_pick(r,datenames)
                 name_score=v223_similarity(merchant,rtext)
-                date_score=v223_date_score(dt,rdate)
+                # Wider reconciliation window: up to 21 days, because bills/invoices
+                # often differ from settlement date.
+                try:
+                    da=pd.to_datetime(dt).date(); db=pd.to_datetime(rdate).date()
+                    days=abs((da-db).days)
+                    date_score=max(0.0,1.0-days/21.0) if days<=21 else 0.0
+                except Exception:
+                    days=None; date_score=0.0
 
-                # V22.3.4: continuous evidence score, not fixed buckets.
-                # Exact amount is already required above, so amount contributes 45%.
-                # Merchant/reference similarity contributes 35%.
-                # Date proximity contributes 20%.
-                amount_score = 1.0
-                score = (
-                    0.45 * amount_score +
-                    0.35 * name_score +
-                    0.20 * date_score
-                )
+                # Plaid amount sign conventions can vary by account. Use document type
+                # as a small directional prior, never as the sole reason to match.
+                direction_score=0.50
+                if kind in ("bill","bill payment"): direction_score=0.75 if bank_amt>=0 else 0.45
+                elif kind in ("invoice","invoice payment"): direction_score=0.75 if bank_amt<0 else 0.45
 
-                # An exact-dollar coincidence with weak merchant/date evidence is not enough.
-                if name_score < 0.30 and date_score < 0.20:
-                    score = min(score, 0.49)
+                score=(0.48*amount_score + 0.27*name_score +
+                       0.20*date_score + 0.05*direction_score)
 
-                if score >= 0.60:
+                # Require at least two useful signals. Exact amount alone is a candidate,
+                # but not a high-confidence automatic-looking match.
+                useful=sum([amount_score>=0.90,name_score>=0.45,date_score>=0.45])
+                if useful<2: score=min(score,0.64)
+
+                if score>=0.52:
                     candidates.append({
                         "kind":kind,"target_id":int(rid),"score":min(score,0.99),
-                        "label":str(rtext or f"{kind} #{rid}"),
-                        "date":str(rdate or ""),"amount":ramt,
-                        "name_score":name_score,"date_score":date_score,
-                        "amount_score":amount_score
+                        "label":str(rtext or f"{kind} #{rid}"),"date":str(rdate or ""),
+                        "amount":ramt,"name_score":name_score,"date_score":date_score,
+                        "amount_score":amount_score,"direction_score":direction_score,
+                        "days":days,"amount_diff":diff
                     })
-
         candidates.sort(key=lambda x:x["score"],reverse=True)
-        return candidates[:5]
+        return candidates[:8]
+    finally:
+        c.close()
+
+def v235_candidate_label(c):
+    bits=[f'{c["kind"].title()} #{c["target_id"]}', f'{c["amount"]:,.2f}']
+    if c.get("date"): bits.append(str(c["date"])[:10])
+    if c.get("label"): bits.append(str(c["label"])[:55])
+    bits.append(f'{c["score"]:.0%} match')
+    return " · ".join(bits)
+
+def v235_manual_match(feed_id,target_kind,target_id,score,note):
+    """Bind a bank row to a user-selected Sullivan record without creating duplicates."""
+    c=connect()
+    try:
+        c.execute("""UPDATE bank_feed_transactions SET ledger_status='matched',
+        reconciliation_type=?,reconciliation_target_id=?,reconciliation_confidence=?,
+        reconciliation_note=?,ledger_transaction_id=?,reviewed_at=?,updated_at=?
+        WHERE id=? AND workspace_key=?""",
+        (target_kind,int(target_id),float(score),note,int(target_id),
+         datetime.now().isoformat(timespec="seconds"),datetime.now().isoformat(timespec="seconds"),
+         int(feed_id),v222_wk()))
+        c.commit()
     finally:c.close()
 
 
@@ -9105,8 +9131,8 @@ def v223_analyze_feed():
             top=cand[0]
             note=(
                 f'{top["kind"].title()} #{top["target_id"]} · {top["label"]} · '
-                f'calculation: amount {top["amount_score"]:.0%} ×45% + '
-                f'merchant {top["name_score"]:.0%} ×35% + date {top["date_score"]:.0%} ×20%'
+                f'amount {top["amount_score"]:.0%} · merchant {top["name_score"]:.0%} · '
+                f'date {top["date_score"]:.0%} · difference {top["amount_diff"]:,.2f}'
             )
             updates.append((top["kind"],top["target_id"],top["score"],note,f["id"]))
         else:
@@ -9190,7 +9216,7 @@ def v223_reset(feed_id):
 
 def v223_render_reconciliation():
     st.markdown("### Smart reconciliation")
-    st.caption("Sullivan now calculates scores from the evidence available for each transaction instead of assigning fixed percentages. Reconciliation and categorization remain separate, and nothing is posted automatically.")
+    st.caption("Sullivan searches your real invoices, bills, payments, ledger entries and journals for possible matches. You can confirm the best candidate or choose another matching Sullivan record.")
     rows=v223_feed_rows()
     if not rows:
         st.info("Connect and sync a bank to start reconciliation.")
@@ -9248,14 +9274,41 @@ def v223_render_reconciliation():
                 else:
                     st.info(r["reconciliation_note"])
 
+            # Let the user reconcile against real Sullivan records even when the
+            # automatic top suggestion is not strong enough.
+            if r["ledger_status"]=="new" and not r["pending"]:
+                feed_for_match=dict(r)
+                feed_for_match["authorized_date"]=None
+                candidates=v223_candidates_for_feed(feed_for_match)
+                if candidates:
+                    with st.expander(f"Match to a Sullivan record ({len(candidates)} candidate{'s' if len(candidates)!=1 else ''})"):
+                        opts={v235_candidate_label(c):c for c in candidates}
+                        choice=st.selectbox("Choose the record this bank transaction belongs to",
+                            ["— Select a record —"]+list(opts.keys()),key=f'v235_pick_{r["id"]}')
+                        if choice!="— Select a record —":
+                            chosen=opts[choice]
+                            st.caption(
+                                f'Amount similarity {chosen["amount_score"]:.0%} · '
+                                f'Merchant similarity {chosen["name_score"]:.0%} · '
+                                f'Date proximity {chosen["date_score"]:.0%}'
+                            )
+                            if st.button("Confirm reconciliation",type="primary",
+                                         key=f'v235_confirm_{r["id"]}',use_container_width=True):
+                                note=f'Manually confirmed against {chosen["kind"]} #{chosen["target_id"]}'
+                                v235_manual_match(r["id"],chosen["kind"],chosen["target_id"],chosen["score"],note)
+                                st.success("Transaction reconciled.")
+                                st.rerun()
+                else:
+                    st.caption("No Sullivan invoice, bill, payment or ledger record is close enough yet. Add the record first, then analyze again.")
+
             if r["ledger_status"]=="new" and not r["pending"]:
                 typ=r["reconciliation_type"]
                 target=r["reconciliation_target_id"]
                 x,y,z=st.columns(3)
                 with x:
                     conf=float(r["reconciliation_confidence"] or 0)
-                    if target and typ not in ("category","pending") and conf >= 0.60:
-                        label="Accept match" if conf >= 0.85 else "Review & accept"
+                    if target and typ not in ("category","pending") and conf >= 0.52:
+                        label="Accept match" if conf >= 0.82 else "Review & accept"
                         if st.button(label,key=f'v223_accept_{r["id"]}',use_container_width=True):
                             v223_mark_match(r["id"]);st.rerun()
                     elif typ=="category" and conf >= 0.25:
@@ -9329,7 +9382,7 @@ def v222_render_bank_connections():
     if not ac.empty:st.markdown("#### Accounts");st.dataframe(ac,use_container_width=True,hide_index=True)
     fd=v222_feed()
     if not fd.empty:st.markdown("#### Latest bank activity");st.dataframe(fd,use_container_width=True,hide_index=True)
-    st.caption("Bank-feed transactions stay separate from the ledger in V22.3.4, preventing accidental duplicate posting.")
+    st.caption("Bank-feed transactions stay separate from the ledger in V22.3.5, preventing accidental duplicate posting.")
     st.divider()
     v223_render_reconciliation()
 
@@ -9354,7 +9407,7 @@ V204_CANADA_REGIONS = [
 
 
 # ============================================================
-# V22.3.4 — LIVE GLOBAL TAX PROFILE ENGINE
+# V22.3.5 — LIVE GLOBAL TAX PROFILE ENGINE
 # ============================================================
 # Built-in verified engines remain authoritative for Quebec and Virginia.
 # Other jurisdictions can be researched once with OpenAI web search, cached
@@ -13420,7 +13473,7 @@ with main_sections[5]:
                         st.error(f"Could not refresh the tax profile: {type(e).__name__}: {e}")
 
             st.caption(
-                "V22.3.4 recognizes ISO countries/territories and available first-level regions globally. "
+                "V22.3.5 recognizes ISO countries/territories and available first-level regions globally. "
                 "Detailed tax calculations are only labeled verified where Sullivan has an explicit jurisdiction model; "
                 "unsupported tax formulas are never silently invented."
             )
