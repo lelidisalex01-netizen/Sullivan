@@ -16,10 +16,10 @@ import math
 import html
 import time
 
-st.set_page_config(page_title="Sullivan V22.2.2", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V22.2.3", page_icon="S", layout="wide")
 
 # ============================================================
-# V22.2.2 — GLOBAL COUNTRY + TAX-REGION ARCHITECTURE
+# V22.2.3 — GLOBAL COUNTRY + TAX-REGION ARCHITECTURE
 # ISO 3166 country/territory names and first-level subdivisions
 # are embedded so Sullivan does not depend on a runtime web call.
 # ============================================================
@@ -5251,7 +5251,7 @@ v17_init_auth_tables()
 
 # V22.0.2 automatic cloud safety backup.
 v22_autosave_fragment()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.2.2</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.2.3</span></div>",unsafe_allow_html=True)
 
 
 
@@ -6603,7 +6603,7 @@ st.session_state["v19_ui_theme"] = _theme_name
 
 st.markdown("""
 <style>
-/* V22.2.2 — Bank connection control polish */
+/* V22.2.3 — Bank connection control polish */
 
 .sullivan-bank-connect-title {
     display:block !important;
@@ -6616,19 +6616,13 @@ st.markdown("""
     font-weight:750 !important;
     line-height:1.25 !important;
 }
-div[data-testid="stExpander"] details summary {
-    font-weight: 700 !important;
-}
-div[data-testid="stExpander"] details summary:hover {
-    filter: brightness(1.04);
-}
 </style>
 """, unsafe_allow_html=True)
 
 
 st.markdown(r"""
 <style>
-/* V22.2.2: own the visible select chevron instead of relying on BaseWeb's SVG. */
+/* V22.2.3: own the visible select chevron instead of relying on BaseWeb's SVG. */
 div[data-baseweb="select"] > div:first-child {
     position: relative !important;
 }
@@ -6652,7 +6646,7 @@ div[data-baseweb="select"] > div:first-child > div:last-child::after {
 </style>
 """, unsafe_allow_html=True)
 
-# V22.2.2 — force Streamlit/BaseWeb select chevrons to contrast with
+# V22.2.3 — force Streamlit/BaseWeb select chevrons to contrast with
 # Sullivan's actual in-app theme (not the computer/browser theme).
 # `filter` is used because newer Streamlit versions can render the chevron
 # with internal SVG styling that ignores normal fill/color overrides.
@@ -8426,7 +8420,7 @@ def v2043_delete_record_control(table, id_col, label_col, title):
 
 
 # ============================================================
-# V22.2.2 — BANK CONNECTIONS + AUTOMATIC TRANSACTION SYNC
+# V22.2.3 — BANK CONNECTIONS + AUTOMATIC TRANSACTION SYNC
 # Plaid Link + cursor-based Transactions Sync
 # ============================================================
 def v222_plaid_secret(name, default=""):
@@ -8488,6 +8482,15 @@ def v222_bank_tables():
           category_primary TEXT, category_detailed TEXT, raw_json TEXT,
           ledger_status TEXT DEFAULT 'new', ledger_transaction_id INTEGER, updated_at TEXT,
           UNIQUE(workspace_key,provider,transaction_id));
+        CREATE TABLE IF NOT EXISTS plaid_link_sessions(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          workspace_key TEXT NOT NULL,
+          link_token TEXT NOT NULL,
+          hosted_link_url TEXT,
+          status TEXT NOT NULL DEFAULT 'pending',
+          created_at TEXT NOT NULL,
+          completed_at TEXT
+        );
         """)
         c.commit()
     finally: c.close()
@@ -8502,12 +8505,83 @@ def v222_link_countries():
         return [code] if code in V222_COUNTRIES else ["US","CA"]
     except Exception: return ["US","CA"]
 
+def v222_app_url():
+    # Current production URL. Can be overridden later without code changes.
+    try:
+        return str(st.secrets.get("SULLIVAN_APP_URL") or "https://sullivan-accounting.streamlit.app").rstrip("/")
+    except Exception:
+        return "https://sullivan-accounting.streamlit.app"
+
 def v222_create_link_token():
+    """Create a Plaid Hosted Link session instead of loading Plaid JS in Streamlit's iframe."""
     uid=hashlib.sha256(("sullivan:"+v222_wk()).encode()).hexdigest()[:48]
+    completion=v222_app_url()+"/?plaid_hosted_return=1"
     data=v222_plaid_post("/link/token/create",{
-      "user":{"client_user_id":uid},"client_name":"Sullivan",
-      "products":["transactions"],"country_codes":v222_link_countries(),"language":"en"})
-    return data.get("link_token")
+      "user":{"client_user_id":uid},
+      "client_name":"Sullivan",
+      "products":["transactions"],
+      "country_codes":v222_link_countries(),
+      "language":"en",
+      "hosted_link":{
+          "completion_redirect_uri":completion,
+          "url_lifetime_seconds":1800
+      }
+    })
+    link_token=data.get("link_token")
+    hosted_url=data.get("hosted_link_url")
+    if not link_token or not hosted_url:
+        raise RuntimeError("Plaid did not return a Hosted Link URL.")
+    now=datetime.now().isoformat(timespec="seconds")
+    c=connect()
+    try:
+        c.execute("""INSERT INTO plaid_link_sessions
+        (workspace_key,link_token,hosted_link_url,status,created_at)
+        VALUES(?,?,?,?,?)""",(v222_wk(),link_token,hosted_url,"pending",now))
+        # Keep only a small recent history per workspace.
+        c.execute("""DELETE FROM plaid_link_sessions WHERE workspace_key=? AND id NOT IN
+        (SELECT id FROM plaid_link_sessions WHERE workspace_key=? ORDER BY id DESC LIMIT 12)""",
+        (v222_wk(),v222_wk()))
+        c.commit()
+    finally:
+        c.close()
+    return {"link_token":link_token,"hosted_link_url":hosted_url}
+
+def v222_latest_pending_link():
+    v222_bank_tables()
+    c=connect()
+    try:
+        row=c.execute("""SELECT id,link_token,hosted_link_url,created_at
+        FROM plaid_link_sessions
+        WHERE workspace_key=? AND status='pending'
+        ORDER BY id DESC LIMIT 1""",(v222_wk(),)).fetchone()
+        if not row:return None
+        return dict(zip(["id","link_token","hosted_link_url","created_at"],row))
+    finally:c.close()
+
+def v222_finish_hosted_link():
+    """Read the finished Hosted Link session from Plaid and exchange its public token."""
+    pending=v222_latest_pending_link()
+    if not pending:
+        raise RuntimeError("No pending Plaid connection session was found. Start Connect bank again.")
+    d=v222_plaid_post("/link/token/get",{"link_token":pending["link_token"]})
+    # Hosted Link exposes the public token(s) through /link/token/get after completion.
+    public_tokens=d.get("public_tokens") or []
+    if not public_tokens:
+        # Some responses expose a single public_token; accept it defensively.
+        single=d.get("public_token")
+        if single: public_tokens=[single]
+    if not public_tokens:
+        status=d.get("status") or d.get("link_session_id") or "not completed"
+        raise RuntimeError(f"Plaid session is not complete yet ({status}).")
+    item=v222_exchange(public_tokens[0],"","Plaid institution")
+    now=datetime.now().isoformat(timespec="seconds")
+    c=connect()
+    try:
+        c.execute("""UPDATE plaid_link_sessions SET status='completed',completed_at=?
+        WHERE id=? AND workspace_key=?""",(now,pending["id"],v222_wk()))
+        c.commit()
+    finally:c.close()
+    return item
 
 def v222_exchange(public_token,inst_id="",inst_name=""):
     d=v222_plaid_post("/item/public_token/exchange",{"public_token":public_token})
@@ -8616,120 +8690,24 @@ def v222_disconnect(conn):
         c.execute("DELETE FROM bank_connections WHERE workspace_key=? AND item_id=?",(v222_wk(),conn["item_id"]))
     write(fn)
 
-def v222_link_component(token):
-    # Plaid's JS bundle loads asynchronously inside Streamlit's component iframe.
-    # V22.2 initialized Plaid immediately, so clicks could silently do nothing if
-    # the external script had not finished loading. V22.2.2 initializes Link only
-    # from the script's onload callback and shows a real loading/error state.
-    tok=json.dumps(token)
-    components.html(f"""
-    <div style="font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
-      <button id="pb" disabled
-        style="width:100%;padding:13px 18px;border:1px solid rgba(255,255,255,.14);
-        border-radius:10px;background:#1f7bf4;color:#fff;font-weight:750;font-size:15px;
-        cursor:not-allowed;opacity:.70;transition:.15s ease;">
-        Loading secure bank connection…
-      </button>
-      <div id="pe" style="display:none;margin-top:8px;font-size:12px;color:#ffb4b4;"></div>
-    </div>
-
-    <script>
-      let plaidHandler = null;
-      const btn = document.getElementById("pb");
-      const err = document.getElementById("pe");
-
-      function fail(message) {{
-        btn.disabled = true;
-        btn.textContent = "Bank connection unavailable";
-        btn.style.opacity = ".72";
-        btn.style.cursor = "not-allowed";
-        err.style.display = "block";
-        err.textContent = message;
-      }}
-
-      function initPlaid() {{
-        try {{
-          if (!window.Plaid) {{
-            fail("Plaid Link did not load. Refresh Sullivan and try again.");
-            return;
-          }}
-
-          plaidHandler = window.Plaid.create({{
-            token: {tok},
-            onLoad: function() {{
-              btn.disabled = false;
-              btn.textContent = "Connect a bank";
-              btn.style.opacity = "1";
-              btn.style.cursor = "pointer";
-            }},
-            onSuccess: function(public_token, metadata) {{
-              btn.disabled = true;
-              btn.textContent = "Finishing connection…";
-              const u = new URL(window.parent.location.href);
-              u.searchParams.set("plaid_public_token", public_token);
-              u.searchParams.set(
-                "plaid_institution_id",
-                metadata && metadata.institution ? metadata.institution.institution_id : ""
-              );
-              u.searchParams.set(
-                "plaid_institution_name",
-                metadata && metadata.institution ? metadata.institution.name : ""
-              );
-              window.parent.location.assign(u.toString());
-            }},
-            onExit: function(linkError, metadata) {{
-              btn.disabled = false;
-              btn.textContent = "Connect a bank";
-              btn.style.opacity = "1";
-              btn.style.cursor = "pointer";
-              if (linkError && linkError.display_message) {{
-                err.style.display = "block";
-                err.textContent = linkError.display_message;
-              }}
-            }}
-          }});
-        }} catch (e) {{
-          fail("Could not initialize Plaid Link: " + (e && e.message ? e.message : e));
-        }}
-      }}
-
-      btn.addEventListener("click", function() {{
-        if (!plaidHandler) {{
-          fail("Plaid Link is still loading. Refresh Sullivan and try again.");
-          return;
-        }}
-        try {{
-          plaidHandler.open();
-        }} catch (e) {{
-          fail("Could not open Plaid Link: " + (e && e.message ? e.message : e));
-        }}
-      }});
-
-      const s = document.createElement("script");
-      s.src = "https://cdn.plaid.com/link/v2/stable/link-initialize.js";
-      s.async = true;
-      s.onload = initPlaid;
-      s.onerror = function() {{
-        fail("Plaid Link could not be loaded from cdn.plaid.com.");
-      }};
-      document.head.appendChild(s);
-    </script>
-    """,height=76)
-
 def v222_handle_return():
-    token=st.query_params.get("plaid_public_token")
-    if not token:return
+    if str(st.query_params.get("plaid_hosted_return","")) != "1":
+        return
     try:
         with st.spinner("Finishing secure bank connection…"):
-            item=v222_exchange(token,st.query_params.get("plaid_institution_id",""),
-                               st.query_params.get("plaid_institution_name",""))
+            item=v222_finish_hosted_link()
             conn=next(x for x in v222_connection_rows() if x["item_id"]==item)
             v222_sync_one(conn)
-        for k in ["plaid_public_token","plaid_institution_id","plaid_institution_name"]:
-            try:del st.query_params[k]
-            except Exception:pass
-        st.success("Bank connected successfully.");st.rerun()
-    except Exception as e:st.error(f"Bank connection failed: {type(e).__name__}: {e}")
+        try: del st.query_params["plaid_hosted_return"]
+        except Exception: pass
+        st.success("Bank connected successfully.")
+        st.rerun()
+    except Exception as e:
+        st.error(f"Bank connection failed: {type(e).__name__}: {e}")
+        if st.button("Clear bank return and try again",key="v223_clear_return"):
+            try: del st.query_params["plaid_hosted_return"]
+            except Exception: pass
+            st.rerun()
 
 def v222_render_bank_connections():
     st.markdown("### Bank connections")
@@ -8752,11 +8730,16 @@ def v222_render_bank_connections():
         unsafe_allow_html=True
     )
     try:
-        t=v222_create_link_token()
-        if t:
-            v222_link_component(t)
+        hosted=v222_create_link_token()
+        st.link_button(
+            "Connect a bank",
+            hosted["hosted_link_url"],
+            type="primary",
+            use_container_width=True
+        )
+        st.caption("Opens Plaid's secure hosted connection page. Sullivan never receives your bank password.")
     except Exception as e:
-        st.error(f"Could not start Plaid Link: {type(e).__name__}: {e}")
+        st.error(f"Could not start Plaid Hosted Link: {type(e).__name__}: {e}")
     for n,conn in enumerate(conns):
         a,b=st.columns([4,1]);a.write(f"**{conn.get('institution_name') or 'Connected institution'}**  \nLast sync: {conn.get('last_sync_at') or 'Not yet'}")
         if b.button("Disconnect",key=f"v222_disc_{n}"):v222_disconnect(conn);st.rerun()
@@ -8764,7 +8747,7 @@ def v222_render_bank_connections():
     if not ac.empty:st.markdown("#### Accounts");st.dataframe(ac,use_container_width=True,hide_index=True)
     fd=v222_feed()
     if not fd.empty:st.markdown("#### Latest bank activity");st.dataframe(fd,use_container_width=True,hide_index=True)
-    st.caption("Bank-feed transactions stay separate from the ledger in V22.2.2, preventing accidental duplicate posting.")
+    st.caption("Bank-feed transactions stay separate from the ledger in V22.2.3, preventing accidental duplicate posting.")
 
 
 # ============================================================
@@ -8787,7 +8770,7 @@ V204_CANADA_REGIONS = [
 
 
 # ============================================================
-# V22.2.2 — LIVE GLOBAL TAX PROFILE ENGINE
+# V22.2.3 — LIVE GLOBAL TAX PROFILE ENGINE
 # ============================================================
 # Built-in verified engines remain authoritative for Quebec and Virginia.
 # Other jurisdictions can be researched once with OpenAI web search, cached
@@ -12839,7 +12822,7 @@ with main_sections[5]:
                         st.error(f"Could not refresh the tax profile: {type(e).__name__}: {e}")
 
             st.caption(
-                "V22.2.2 recognizes ISO countries/territories and available first-level regions globally. "
+                "V22.2.3 recognizes ISO countries/territories and available first-level regions globally. "
                 "Detailed tax calculations are only labeled verified where Sullivan has an explicit jurisdiction model; "
                 "unsupported tax formulas are never silently invented."
             )
