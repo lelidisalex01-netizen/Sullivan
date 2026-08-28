@@ -17,10 +17,10 @@ import math
 import html
 import time
 
-st.set_page_config(page_title="Sullivan V22.3.5", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V22.3.6", page_icon="S", layout="wide")
 
 # ============================================================
-# V22.3.5 — GLOBAL COUNTRY + TAX-REGION ARCHITECTURE
+# V22.3.6 — GLOBAL COUNTRY + TAX-REGION ARCHITECTURE
 # ISO 3166 country/territory names and first-level subdivisions
 # are embedded so Sullivan does not depend on a runtime web call.
 # ============================================================
@@ -5252,7 +5252,7 @@ v17_init_auth_tables()
 
 # V22.0.2 automatic cloud safety backup.
 v22_autosave_fragment()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.3.5</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.3.6</span></div>",unsafe_allow_html=True)
 
 
 
@@ -6604,7 +6604,7 @@ st.session_state["v19_ui_theme"] = _theme_name
 
 st.markdown("""
 <style>
-/* V22.3.5 — Bank connection control polish */
+/* V22.3.6 — Bank connection control polish */
 
 .sullivan-bank-connect-title {
     display:block !important;
@@ -6623,7 +6623,7 @@ st.markdown("""
 
 st.markdown(r"""
 <style>
-/* V22.3.5: own the visible select chevron instead of relying on BaseWeb's SVG. */
+/* V22.3.6: own the visible select chevron instead of relying on BaseWeb's SVG. */
 div[data-baseweb="select"] > div:first-child {
     position: relative !important;
 }
@@ -6647,7 +6647,7 @@ div[data-baseweb="select"] > div:first-child > div:last-child::after {
 </style>
 """, unsafe_allow_html=True)
 
-# V22.3.5 — force Streamlit/BaseWeb select chevrons to contrast with
+# V22.3.6 — force Streamlit/BaseWeb select chevrons to contrast with
 # Sullivan's actual in-app theme (not the computer/browser theme).
 # `filter` is used because newer Streamlit versions can render the chevron
 # with internal SVG styling that ignores normal fill/color overrides.
@@ -8421,7 +8421,7 @@ def v2043_delete_record_control(table, id_col, label_col, title):
 
 
 # ============================================================
-# V22.3.5 — BANK CONNECTIONS + AUTOMATIC TRANSACTION SYNC
+# V22.3.6 — BANK CONNECTIONS + AUTOMATIC TRANSACTION SYNC
 # Plaid Link + cursor-based Transactions Sync
 # ============================================================
 def v222_plaid_secret(name, default=""):
@@ -8497,7 +8497,7 @@ def v222_bank_tables():
           completed_at TEXT
         );
         """)
-        # V22.3.5 migration: bind each Hosted Link redirect to the exact Link token
+        # V22.3.6 migration: bind each Hosted Link redirect to the exact Link token
         # that created it. This prevents a later Streamlit rerun/new token from
         # stealing the return flow.
         try:
@@ -9214,9 +9214,205 @@ def v223_reset(feed_id):
         c.commit()
     finally:c.close()
 
+
+def v236_sullivan_category(feed):
+    """Translate bank merchant/Plaid context into Sullivan's own bookkeeping categories."""
+    merchant=str(feed.get("merchant_name") or feed.get("name") or "")
+    plaid=" ".join([
+        str(feed.get("category_primary") or ""),
+        str(feed.get("category_detailed") or "")
+    ]).lower()
+    hay=f"{merchant} {plaid}".lower()
+
+    # First use Sullivan's established deterministic merchant rules.
+    try:
+        for pattern,category,confidence in RULES:
+            if re.search(pattern, merchant, re.I):
+                return category,float(confidence),"Sullivan merchant rule"
+    except Exception:
+        pass
+
+    mappings=[
+        (["flight","airline","travel flights","united airlines","air canada","delta","westjet","porter"],"Travel / Airfare"),
+        (["hotel","lodging","motel","accommodation"],"Travel / Lodging"),
+        (["taxi","ride share","rideshare","uber","lyft"],"Travel / Local Transport"),
+        (["gas","fuel","service station","shell","esso","exxon","mobil"],"Vehicle / Fuel"),
+        (["restaurant","food and drink","fast food","coffee","dining"],"Meals"),
+        (["software","subscription","digital purchase","adobe","microsoft"],"Software / Subscriptions"),
+        (["internet","telecommunication","phone","mobile"],"Phone / Internet"),
+        (["rent","lease"],"Rent / Occupancy"),
+        (["utility","electric","water","natural gas"],"Utilities"),
+        (["insurance"],"Insurance"),
+        (["advertising","marketing"],"Advertising / Marketing"),
+        (["professional","legal","accounting"],"Professional Fees"),
+        (["office supplies"],"Office Supplies"),
+        (["hardware","home improvement","building supplies"],"Materials & Supplies"),
+        (["bank fee","merchant fee","overdraft","service fee"],"Bank / Merchant Fees"),
+        (["interest"],"Interest Expense"),
+        (["payroll","wages","salary"],"Payroll"),
+        (["income","payroll income","deposit","revenue"],"Income"),
+        (["transfer","credit card payment","loan payment"],"Loan Payment / Transfer"),
+    ]
+    for words,cat in mappings:
+        hits=sum(1 for w in words if w in hay)
+        if hits:
+            # Evidence changes based on how many independent textual cues agree.
+            return cat,min(.90,.62+.08*hits),"Plaid + merchant mapping"
+    return "Uncategorized",.35,"No strong Sullivan rule"
+
+def v236_is_inflow(feed, category):
+    """Normalize Plaid's depository sign convention into Sullivan's ledger sign convention."""
+    primary=str(feed.get("category_primary") or "").upper()
+    detailed=str(feed.get("category_detailed") or "").upper()
+    label=f"{primary} {detailed}"
+    if category=="Income" or any(x in label for x in ["INCOME","TRANSFER_IN","DEPOSIT"]):
+        return True
+    if any(x in label for x in ["TRANSFER_OUT","LOAN_PAYMENT","CREDIT_CARD_PAYMENT"]):
+        return False
+    # Plaid Transactions generally reports positive amounts for money leaving
+    # depository accounts. Expenses therefore become negative in Sullivan.
+    return False
+
+def v236_create_from_bank(feed_id, category):
+    """Create one Sullivan transaction from a bank-feed row and reconcile them atomically."""
+    c=connect()
+    try:
+        cols=["id","transaction_id","posted_date","authorized_date","name","merchant_name",
+              "amount","currency","pending","category_primary","category_detailed",
+              "ledger_status","ledger_transaction_id"]
+        row=c.execute("""SELECT id,transaction_id,posted_date,authorized_date,name,merchant_name,
+            amount,currency,pending,category_primary,category_detailed,ledger_status,ledger_transaction_id
+            FROM bank_feed_transactions WHERE id=? AND workspace_key=?""",
+            (int(feed_id),v222_wk())).fetchone()
+        if not row:
+            raise ValueError("Bank transaction was not found.")
+        feed=dict(zip(cols,row))
+        if int(feed.get("pending") or 0):
+            raise ValueError("Wait until this bank transaction is posted before creating an accounting record.")
+        if feed.get("ledger_status")=="matched":
+            raise ValueError("This bank transaction is already reconciled.")
+
+        merchant=str(feed.get("merchant_name") or feed.get("name") or "Bank transaction")
+        day=str(feed.get("posted_date") or feed.get("authorized_date") or datetime.now().date())
+        raw_amount=abs(float(feed.get("amount") or 0))
+        inflow=v236_is_inflow(feed,category)
+        sullivan_amount=raw_amount if inflow else -raw_amount
+
+        account=CATEGORY_TO_ACCOUNT.get(category)
+        if not account:
+            account="4000 Sales Revenue" if inflow else "6999 Uncategorized Expense"
+
+        # Bank transaction ID makes the accounting record idempotent.
+        fingerprint=hashlib.sha256(
+            f'plaid|{v222_wk()}|{feed.get("transaction_id")}'.encode()
+        ).hexdigest()
+
+        existing=c.execute("SELECT id FROM transactions WHERE fingerprint=?",(fingerprint,)).fetchone()
+        if existing:
+            tid=int(existing[0])
+        else:
+            status="Ready for books"
+            explanation="Created from connected bank feed during Smart Reconciliation."
+            c.execute("""INSERT INTO transactions(
+                date,description,amount,category,confidence,review,explanation,question,owner_answer,
+                source,status,source_file,fingerprint,account,receipt_name,receipt_attached,
+                tax_included,gst_amount,qst_amount,business_use_pct,tax_eligible,counterparty_name,
+                counterparty_type,reconciled,period_locked,tax_reviewed)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    day,merchant,sullivan_amount,category,1.0,0,explanation,"","",
+                    "Plaid Bank Feed",status,"",fingerprint,account,"",0,
+                    0,0.0,0.0,100.0,0,merchant,
+                    "Customer" if inflow else "Vendor",1,0,0
+                ))
+            tid=int(c.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+        stamp=datetime.now().isoformat(timespec="seconds")
+        c.execute("""UPDATE bank_feed_transactions SET ledger_status='matched',
+            ledger_transaction_id=?,reconciliation_type='ledger transaction',
+            reconciliation_target_id=?,reconciliation_confidence=1.0,
+            reconciliation_note=?,reviewed_at=?,updated_at=?
+            WHERE id=? AND workspace_key=?""",
+            (tid,tid,f'Created and reconciled to Sullivan transaction #{tid}',
+             stamp,stamp,int(feed_id),v222_wk()))
+
+        # Learn the user's confirmed merchant/category choice.
+        normalized=norm(merchant)
+        if normalized:
+            c.execute("""INSERT INTO learned_rules(normalized_description,category,times_confirmed)
+                VALUES(?,?,1)
+                ON CONFLICT(normalized_description) DO UPDATE SET
+                category=excluded.category,
+                times_confirmed=learned_rules.times_confirmed+1""",
+                (normalized,category))
+
+        try:
+            c.execute("""INSERT INTO audit_log(ts,event_type,entity_type,entity_id,actor,details)
+                VALUES(?,?,?,?,?,?)""",
+                (stamp,"bank_created_and_reconciled","transaction",str(tid),"Sullivan",
+                 f"Plaid bank feed #{feed_id}; category={category}"))
+        except Exception:
+            pass
+
+        c.commit()
+        return tid
+    except Exception:
+        c.rollback()
+        raise
+    finally:
+        c.close()
+
+def v236_create_record_ui(r):
+    """One-step fallback when no existing accounting record can be reconciled."""
+    feed=dict(r)
+    suggested,rule_conf,source=v236_sullivan_category(feed)
+
+    # Personal workspaces get friendly personal labels, while company workspaces
+    # use Sullivan's chart-of-accounts categories underneath.
+    is_business=current_company() is not None
+    title="Create accounting record from bank transaction" if is_business else "Add transaction from bank activity"
+
+    with st.expander(title, expanded=False):
+        st.caption(
+            "No existing Sullivan record matches this bank transaction. "
+            "Create one from the bank data and Sullivan will reconcile it immediately."
+        )
+        options=list(CATEGORIES)
+        if suggested not in options:
+            options.append(suggested)
+        default_index=options.index(suggested) if suggested in options else options.index("Uncategorized")
+        category=st.selectbox(
+            "Category",
+            options,
+            index=default_index,
+            key=f'v236_category_{r["id"]}'
+        )
+        account=CATEGORY_TO_ACCOUNT.get(category,"6999 Uncategorized Expense")
+        if is_business:
+            st.caption(f"Suggested from {source} · posts to {account}")
+        else:
+            st.caption(f"Suggested from {source} · saved to your Personal workspace")
+
+        merchant=r.get("merchant_name") or r.get("name") or "Bank transaction"
+        amount=abs(float(r.get("amount") or 0))
+        st.markdown(f"**Create:** {merchant} · {amount:,.2f} {r.get('currency') or ''} → **{category}**")
+
+        if st.button(
+            "Create & reconcile",
+            type="primary",
+            use_container_width=True,
+            key=f'v236_create_{r["id"]}'
+        ):
+            try:
+                tid=v236_create_from_bank(r["id"],category)
+                st.success(f"Created Sullivan transaction #{tid} and reconciled it to the bank.")
+                st.rerun()
+            except Exception as ex:
+                st.error(str(ex))
+
 def v223_render_reconciliation():
     st.markdown("### Smart reconciliation")
-    st.caption("Sullivan searches your real invoices, bills, payments, ledger entries and journals for possible matches. You can confirm the best candidate or choose another matching Sullivan record.")
+    st.caption("Sullivan first searches your existing records. If none match, create the accounting record directly from the bank transaction and reconcile it in one step.")
     rows=v223_feed_rows()
     if not rows:
         st.info("Connect and sync a bank to start reconciliation.")
@@ -9298,8 +9494,10 @@ def v223_render_reconciliation():
                                 v235_manual_match(r["id"],chosen["kind"],chosen["target_id"],chosen["score"],note)
                                 st.success("Transaction reconciled.")
                                 st.rerun()
+                        st.caption("None of these records belong to this transaction?")
+                        v236_create_record_ui(r)
                 else:
-                    st.caption("No Sullivan invoice, bill, payment or ledger record is close enough yet. Add the record first, then analyze again.")
+                    v236_create_record_ui(r)
 
             if r["ledger_status"]=="new" and not r["pending"]:
                 typ=r["reconciliation_type"]
@@ -9382,7 +9580,7 @@ def v222_render_bank_connections():
     if not ac.empty:st.markdown("#### Accounts");st.dataframe(ac,use_container_width=True,hide_index=True)
     fd=v222_feed()
     if not fd.empty:st.markdown("#### Latest bank activity");st.dataframe(fd,use_container_width=True,hide_index=True)
-    st.caption("Bank-feed transactions stay separate from the ledger in V22.3.5, preventing accidental duplicate posting.")
+    st.caption("Bank-feed transactions stay separate from the ledger in V22.3.6, preventing accidental duplicate posting.")
     st.divider()
     v223_render_reconciliation()
 
@@ -9407,7 +9605,7 @@ V204_CANADA_REGIONS = [
 
 
 # ============================================================
-# V22.3.5 — LIVE GLOBAL TAX PROFILE ENGINE
+# V22.3.6 — LIVE GLOBAL TAX PROFILE ENGINE
 # ============================================================
 # Built-in verified engines remain authoritative for Quebec and Virginia.
 # Other jurisdictions can be researched once with OpenAI web search, cached
@@ -13473,7 +13671,7 @@ with main_sections[5]:
                         st.error(f"Could not refresh the tax profile: {type(e).__name__}: {e}")
 
             st.caption(
-                "V22.3.5 recognizes ISO countries/territories and available first-level regions globally. "
+                "V22.3.6 recognizes ISO countries/territories and available first-level regions globally. "
                 "Detailed tax calculations are only labeled verified where Sullivan has an explicit jurisdiction model; "
                 "unsupported tax formulas are never silently invented."
             )
