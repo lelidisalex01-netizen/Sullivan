@@ -17,10 +17,10 @@ import math
 import html
 import time
 
-st.set_page_config(page_title="Sullivan V22.2.6", page_icon="S", layout="wide")
+st.set_page_config(page_title="Sullivan V22.3", page_icon="S", layout="wide")
 
 # ============================================================
-# V22.2.6 — GLOBAL COUNTRY + TAX-REGION ARCHITECTURE
+# V22.3 — GLOBAL COUNTRY + TAX-REGION ARCHITECTURE
 # ISO 3166 country/territory names and first-level subdivisions
 # are embedded so Sullivan does not depend on a runtime web call.
 # ============================================================
@@ -5252,7 +5252,7 @@ v17_init_auth_tables()
 
 # V22.0.2 automatic cloud safety backup.
 v22_autosave_fragment()
-st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.2.6</span></div>",unsafe_allow_html=True)
+st.markdown("<div class=\"v15-topbrand\">Sullivan <span>Business Command Center · V22.3</span></div>",unsafe_allow_html=True)
 
 
 
@@ -6604,7 +6604,7 @@ st.session_state["v19_ui_theme"] = _theme_name
 
 st.markdown("""
 <style>
-/* V22.2.6 — Bank connection control polish */
+/* V22.3 — Bank connection control polish */
 
 .sullivan-bank-connect-title {
     display:block !important;
@@ -6623,7 +6623,7 @@ st.markdown("""
 
 st.markdown(r"""
 <style>
-/* V22.2.6: own the visible select chevron instead of relying on BaseWeb's SVG. */
+/* V22.3: own the visible select chevron instead of relying on BaseWeb's SVG. */
 div[data-baseweb="select"] > div:first-child {
     position: relative !important;
 }
@@ -6647,7 +6647,7 @@ div[data-baseweb="select"] > div:first-child > div:last-child::after {
 </style>
 """, unsafe_allow_html=True)
 
-# V22.2.6 — force Streamlit/BaseWeb select chevrons to contrast with
+# V22.3 — force Streamlit/BaseWeb select chevrons to contrast with
 # Sullivan's actual in-app theme (not the computer/browser theme).
 # `filter` is used because newer Streamlit versions can render the chevron
 # with internal SVG styling that ignores normal fill/color overrides.
@@ -8421,7 +8421,7 @@ def v2043_delete_record_control(table, id_col, label_col, title):
 
 
 # ============================================================
-# V22.2.6 — BANK CONNECTIONS + AUTOMATIC TRANSACTION SYNC
+# V22.3 — BANK CONNECTIONS + AUTOMATIC TRANSACTION SYNC
 # Plaid Link + cursor-based Transactions Sync
 # ============================================================
 def v222_plaid_secret(name, default=""):
@@ -8481,7 +8481,10 @@ def v222_bank_tables():
           item_id TEXT NOT NULL, account_id TEXT, posted_date TEXT, authorized_date TEXT,
           name TEXT, merchant_name TEXT, amount REAL, currency TEXT,pending INTEGER DEFAULT 0,
           category_primary TEXT, category_detailed TEXT, raw_json TEXT,
-          ledger_status TEXT DEFAULT 'new', ledger_transaction_id INTEGER, updated_at TEXT,
+          ledger_status TEXT DEFAULT 'new', ledger_transaction_id INTEGER,
+          reconciliation_type TEXT, reconciliation_target_id INTEGER,
+          reconciliation_confidence REAL, reconciliation_note TEXT,
+          reviewed_at TEXT, updated_at TEXT,
           UNIQUE(workspace_key,provider,transaction_id));
         CREATE TABLE IF NOT EXISTS plaid_link_sessions(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -8494,13 +8497,23 @@ def v222_bank_tables():
           completed_at TEXT
         );
         """)
-        # V22.2.6 migration: bind each Hosted Link redirect to the exact Link token
+        # V22.3 migration: bind each Hosted Link redirect to the exact Link token
         # that created it. This prevents a later Streamlit rerun/new token from
         # stealing the return flow.
         try:
             cols=[r[1] for r in c.execute("PRAGMA table_info(plaid_link_sessions)").fetchall()]
             if "return_state" not in cols:
                 c.execute("ALTER TABLE plaid_link_sessions ADD COLUMN return_state TEXT")
+            feed_cols=[r[1] for r in c.execute("PRAGMA table_info(bank_feed_transactions)").fetchall()]
+            for col,ctype in [
+                ("reconciliation_type","TEXT"),
+                ("reconciliation_target_id","INTEGER"),
+                ("reconciliation_confidence","REAL"),
+                ("reconciliation_note","TEXT"),
+                ("reviewed_at","TEXT")
+            ]:
+                if col not in feed_cols:
+                    c.execute(f"ALTER TABLE bank_feed_transactions ADD COLUMN {col} {ctype}")
         except Exception:
             pass
         c.commit()
@@ -8843,6 +8856,273 @@ def v222_handle_return():
                 except Exception: pass
                 st.rerun()
 
+
+def v223_money(v):
+    try:return round(abs(float(v or 0)),2)
+    except Exception:return 0.0
+
+def v223_norm(s):
+    return re.sub(r"[^a-z0-9]+"," ",str(s or "").lower()).strip()
+
+def v223_similarity(a,b):
+    import difflib
+    a,b=v223_norm(a),v223_norm(b)
+    if not a or not b:return 0.0
+    return difflib.SequenceMatcher(None,a,b).ratio()
+
+def v223_date_score(a,b,max_days=7):
+    try:
+        da=pd.to_datetime(a).date(); db=pd.to_datetime(b).date()
+        days=abs((da-db).days)
+        return max(0.0,1.0-(days/max_days)) if days <= max_days else 0.0
+    except Exception:return 0.0
+
+def v223_table_exists(c,name):
+    try:
+        return bool(c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(name,)).fetchone())
+    except Exception:return False
+
+def v223_cols(c,name):
+    try:return [r[1] for r in c.execute(f'PRAGMA table_info("{name}")').fetchall()]
+    except Exception:return []
+
+def v223_rows(c,name,limit=1000):
+    if not v223_table_exists(c,name):return []
+    cols=v223_cols(c,name)
+    if not cols:return []
+    try:
+        rows=c.execute(f'SELECT * FROM "{name}" ORDER BY rowid DESC LIMIT ?',(limit,)).fetchall()
+        return [dict(zip(cols,r)) for r in rows]
+    except Exception:return []
+
+def v223_pick(row,names):
+    for n in names:
+        if n in row and row.get(n) not in (None,""):
+            return row.get(n)
+    return None
+
+def v223_physical(logical):
+    # Reuse Sullivan's transparent workspace routing when available.
+    try:return _workspace_table_name(logical)
+    except Exception:
+        try:
+            wk=v222_wk()
+            return f"ws_{wk}__{logical}"
+        except Exception:return logical
+
+def v223_candidates_for_feed(feed):
+    """Build deterministic reconciliation candidates from Sullivan accounting records."""
+    c=connect()
+    try:
+        amt=v223_money(feed.get("amount"))
+        dt=feed.get("posted_date") or feed.get("authorized_date")
+        merchant=feed.get("merchant_name") or feed.get("name") or ""
+        candidates=[]
+
+        specs=[
+            ("invoice","invoices",
+             ["id"],["total","amount","total_amount","balance_due"],
+             ["customer_name","customer","memo","description","invoice_number"],
+             ["date","invoice_date","due_date","created_at"]),
+            ("bill","bills",
+             ["id"],["total","amount","total_amount","balance_due"],
+             ["vendor_name","vendor","memo","description","bill_number"],
+             ["date","bill_date","due_date","created_at"]),
+            ("invoice payment","invoice_payments",
+             ["id"],["amount","payment_amount"],
+             ["memo","reference","customer_name"],
+             ["date","payment_date","created_at"]),
+            ("bill payment","bill_payments",
+             ["id"],["amount","payment_amount"],
+             ["memo","reference","vendor_name"],
+             ["date","payment_date","created_at"]),
+            ("ledger transaction","transactions",
+             ["id"],["amount","total","value"],
+             ["merchant","merchant_name","description","memo","name","counterparty"],
+             ["date","transaction_date","posted_date","created_at"]),
+            ("manual journal","manual_journals",
+             ["id"],["amount","total"],
+             ["memo","description","reference"],
+             ["date","journal_date","created_at"]),
+        ]
+
+        for kind,logical,idnames,amtnames,textnames,datenames in specs:
+            name=v223_physical(logical)
+            for r in v223_rows(c,name,1500):
+                rid=v223_pick(r,idnames)
+                rv=v223_pick(r,amtnames)
+                if rid is None or rv is None:continue
+                ramt=v223_money(rv)
+                if abs(ramt-amt)>0.01:continue
+                rtext=v223_pick(r,textnames) or ""
+                rdate=v223_pick(r,datenames)
+                name_score=v223_similarity(merchant,rtext)
+                date_score=v223_date_score(dt,rdate)
+                # Exact amount is required; merchant/date determine confidence.
+                score=0.62 + 0.23*name_score + 0.15*date_score
+                candidates.append({
+                    "kind":kind,"target_id":int(rid),"score":min(score,0.99),
+                    "label":str(rtext or f"{kind} #{rid}"),
+                    "date":str(rdate or ""),"amount":ramt
+                })
+
+        candidates.sort(key=lambda x:x["score"],reverse=True)
+        return candidates[:5]
+    finally:c.close()
+
+def v223_analyze_feed():
+    """Refresh deterministic suggestions without posting anything."""
+    v222_bank_tables()
+    c=connect()
+    try:
+        cols=["id","transaction_id","posted_date","authorized_date","name","merchant_name",
+              "amount","currency","pending","category_primary","category_detailed",
+              "ledger_status","ledger_transaction_id"]
+        rows=c.execute("""SELECT id,transaction_id,posted_date,authorized_date,name,merchant_name,
+        amount,currency,pending,category_primary,category_detailed,ledger_status,ledger_transaction_id
+        FROM bank_feed_transactions WHERE workspace_key=? ORDER BY posted_date DESC,id DESC""",
+        (v222_wk(),)).fetchall()
+        feeds=[dict(zip(cols,r)) for r in rows]
+    finally:c.close()
+
+    updates=[]
+    for f in feeds:
+        if int(f.get("pending") or 0)==1:
+            updates.append(("pending",None,0.0,"Waiting for bank transaction to post.",f["id"]))
+            continue
+        if f.get("ledger_status") in ("matched","posted","ignored"):
+            continue
+        cand=v223_candidates_for_feed(f)
+        if cand:
+            top=cand[0]
+            note=f'{top["kind"].title()} #{top["target_id"]} · {top["label"]}'
+            updates.append((top["kind"],top["target_id"],top["score"],note,f["id"]))
+        else:
+            cat=f.get("category_detailed") or f.get("category_primary") or "Uncategorized"
+            updates.append(("category",None,0.45,f"Suggested category: {cat}",f["id"]))
+
+    c=connect()
+    try:
+        for typ,target,conf,note,fid in updates:
+            c.execute("""UPDATE bank_feed_transactions SET reconciliation_type=?,
+            reconciliation_target_id=?,reconciliation_confidence=?,reconciliation_note=?,
+            updated_at=? WHERE id=? AND workspace_key=?""",
+            (typ,target,conf,note,datetime.now().isoformat(timespec="seconds"),fid,v222_wk()))
+        c.commit()
+    finally:c.close()
+    return len(updates)
+
+def v223_feed_rows():
+    v222_bank_tables()
+    c=connect()
+    try:
+        cols=["id","posted_date","merchant_name","name","amount","currency","pending",
+              "category_primary","category_detailed","ledger_status","ledger_transaction_id",
+              "reconciliation_type","reconciliation_target_id","reconciliation_confidence",
+              "reconciliation_note"]
+        rows=c.execute("""SELECT id,posted_date,merchant_name,name,amount,currency,pending,
+        category_primary,category_detailed,ledger_status,ledger_transaction_id,
+        reconciliation_type,reconciliation_target_id,reconciliation_confidence,reconciliation_note
+        FROM bank_feed_transactions WHERE workspace_key=?
+        ORDER BY posted_date DESC,id DESC LIMIT 500""",(v222_wk(),)).fetchall()
+        return [dict(zip(cols,r)) for r in rows]
+    finally:c.close()
+
+def v223_mark_match(feed_id):
+    c=connect()
+    try:
+        row=c.execute("""SELECT reconciliation_target_id,reconciliation_type
+        FROM bank_feed_transactions WHERE id=? AND workspace_key=?""",(feed_id,v222_wk())).fetchone()
+        if not row:return
+        target,typ=row
+        c.execute("""UPDATE bank_feed_transactions SET ledger_status='matched',
+        ledger_transaction_id=?,reviewed_at=?,updated_at=? WHERE id=? AND workspace_key=?""",
+        (target,datetime.now().isoformat(timespec="seconds"),
+         datetime.now().isoformat(timespec="seconds"),feed_id,v222_wk()))
+        c.commit()
+    finally:c.close()
+
+def v223_ignore(feed_id):
+    c=connect()
+    try:
+        c.execute("""UPDATE bank_feed_transactions SET ledger_status='ignored',
+        reviewed_at=?,updated_at=? WHERE id=? AND workspace_key=?""",
+        (datetime.now().isoformat(timespec="seconds"),
+         datetime.now().isoformat(timespec="seconds"),feed_id,v222_wk()))
+        c.commit()
+    finally:c.close()
+
+def v223_reset(feed_id):
+    c=connect()
+    try:
+        c.execute("""UPDATE bank_feed_transactions SET ledger_status='new',
+        ledger_transaction_id=NULL,reconciliation_type=NULL,reconciliation_target_id=NULL,
+        reconciliation_confidence=NULL,reconciliation_note=NULL,reviewed_at=NULL,updated_at=?
+        WHERE id=? AND workspace_key=?""",
+        (datetime.now().isoformat(timespec="seconds"),feed_id,v222_wk()))
+        c.commit()
+    finally:c.close()
+
+def v223_render_reconciliation():
+    st.markdown("### Smart reconciliation")
+    st.caption("Sullivan compares posted bank activity with your invoices, bills, payments and ledger. Nothing is posted automatically.")
+    rows=v223_feed_rows()
+    if not rows:
+        st.info("Connect and sync a bank to start reconciliation.")
+        return
+
+    a,b,c,d=st.columns(4)
+    a.metric("Needs review",sum(1 for r in rows if r["ledger_status"]=="new" and not r["pending"]))
+    b.metric("Matched",sum(1 for r in rows if r["ledger_status"]=="matched"))
+    c.metric("Pending",sum(1 for r in rows if r["pending"]))
+    d.metric("Ignored",sum(1 for r in rows if r["ledger_status"]=="ignored"))
+
+    if st.button("Analyze unmatched transactions",key="v223_analyze",type="primary",use_container_width=True):
+        with st.spinner("Comparing bank activity with Sullivan records…"):
+            n=v223_analyze_feed()
+        st.success(f"Reviewed {n} bank-feed transactions.")
+        st.rerun()
+
+    view=st.radio("Show",["Needs review","Matched","All"],horizontal=True,key="v223_view")
+    for r in rows:
+        if view=="Needs review" and (r["ledger_status"]!="new" or r["pending"]):continue
+        if view=="Matched" and r["ledger_status"]!="matched":continue
+        merchant=r["merchant_name"] or r["name"] or "Bank transaction"
+        cur=r["currency"] or ""
+        amount=float(r["amount"] or 0)
+        with st.container(border=True):
+            c1,c2,c3=st.columns([4,2,2])
+            with c1:
+                st.markdown(f"**{merchant}**")
+                st.caption(f'{r["posted_date"] or "No date"} · {r["category_detailed"] or r["category_primary"] or "Uncategorized"}')
+            with c2:
+                st.markdown(f"**{amount:,.2f} {cur}**")
+                st.caption("Pending" if r["pending"] else str(r["ledger_status"]).title())
+            with c3:
+                conf=float(r["reconciliation_confidence"] or 0)
+                if conf:st.markdown(f"**{conf:.0%} confidence**")
+
+            if r["reconciliation_note"]:
+                st.info(r["reconciliation_note"])
+
+            if r["ledger_status"]=="new" and not r["pending"]:
+                typ=r["reconciliation_type"]
+                target=r["reconciliation_target_id"]
+                x,y,z=st.columns(3)
+                with x:
+                    if target and typ not in ("category","pending"):
+                        if st.button("Accept match",key=f'v223_accept_{r["id"]}',use_container_width=True):
+                            v223_mark_match(r["id"]);st.rerun()
+                with y:
+                    if st.button("Ignore",key=f'v223_ignore_{r["id"]}',use_container_width=True):
+                        v223_ignore(r["id"]);st.rerun()
+                with z:
+                    if st.button("Re-analyze",key=f'v223_reset_{r["id"]}',use_container_width=True):
+                        v223_reset(r["id"]);st.rerun()
+            elif r["ledger_status"] in ("matched","ignored"):
+                if st.button("Undo review",key=f'v223_undo_{r["id"]}'):
+                    v223_reset(r["id"]);st.rerun()
+
 def v222_render_bank_connections():
     st.markdown("### Bank connections")
     st.caption("Connect bank and credit-card accounts to build Sullivan's automatic bank feed.")
@@ -8902,7 +9182,9 @@ def v222_render_bank_connections():
     if not ac.empty:st.markdown("#### Accounts");st.dataframe(ac,use_container_width=True,hide_index=True)
     fd=v222_feed()
     if not fd.empty:st.markdown("#### Latest bank activity");st.dataframe(fd,use_container_width=True,hide_index=True)
-    st.caption("Bank-feed transactions stay separate from the ledger in V22.2.6, preventing accidental duplicate posting.")
+    st.caption("Bank-feed transactions stay separate from the ledger in V22.3, preventing accidental duplicate posting.")
+    st.divider()
+    v223_render_reconciliation()
 
 
 # ============================================================
@@ -8925,7 +9207,7 @@ V204_CANADA_REGIONS = [
 
 
 # ============================================================
-# V22.2.6 — LIVE GLOBAL TAX PROFILE ENGINE
+# V22.3 — LIVE GLOBAL TAX PROFILE ENGINE
 # ============================================================
 # Built-in verified engines remain authoritative for Quebec and Virginia.
 # Other jurisdictions can be researched once with OpenAI web search, cached
@@ -12977,7 +13259,7 @@ with main_sections[5]:
                         st.error(f"Could not refresh the tax profile: {type(e).__name__}: {e}")
 
             st.caption(
-                "V22.2.6 recognizes ISO countries/territories and available first-level regions globally. "
+                "V22.3 recognizes ISO countries/territories and available first-level regions globally. "
                 "Detailed tax calculations are only labeled verified where Sullivan has an explicit jurisdiction model; "
                 "unsupported tax formulas are never silently invented."
             )
